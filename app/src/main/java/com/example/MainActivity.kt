@@ -73,6 +73,7 @@ private fun LocalMindApp(
     val imageStudioState by viewModel.imageStudioState.collectAsStateWithLifecycle()
     val generatedImages by viewModel.generatedImages.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
+    val updateDownloadState by viewModel.updateDownloadState.collectAsStateWithLifecycle()
     val uiNotice by viewModel.uiNotice.collectAsStateWithLifecycle()
 
     var currentDestination by rememberSaveable { mutableStateOf(AppDestination.CHAT) }
@@ -108,7 +109,9 @@ private fun LocalMindApp(
                     connectionState = connectionState,
                     storageStats = storageStats,
                     hardwareInfo = viewModel.hardwareInfo,
+                    downloadedModels = downloadedModels,
                     updateState = updateState,
+                    updateDownloadState = updateDownloadState,
                     onNavigateBack = { currentDestination = AppDestination.CHAT },
                     onOpenModelHub = { currentDestination = AppDestination.MODEL_HUB },
                     onOpenAgentsMcp = { currentDestination = AppDestination.AGENTS_MCP },
@@ -120,6 +123,11 @@ private fun LocalMindApp(
                     onUpdateLocalEngine = viewModel::updateLocalEngine,
                     onUpdateLocalBackend = viewModel::updateLocalBackend,
                     onUpdateLocalThreads = viewModel::updateLocalThreads,
+                    onUpdateLocalGpuLayers = viewModel::updateLocalGpuLayers,
+                    onUpdateEnableVulkanGpu = viewModel::updateEnableVulkanGpu,
+                    onUpdateEnableSpeculativeDecoding = viewModel::updateEnableSpeculativeDecoding,
+                    onUpdateSpeculativeDraftTokens = viewModel::updateSpeculativeDraftTokens,
+                    onUpdateSpeculativeDraftModelId = viewModel::updateSpeculativeDraftModelId,
                     onUpdateSystemPrompt = viewModel::updateSystemPrompt,
                     onUpdateTemperature = viewModel::updateTemperature,
                     onUpdateMaxTokens = viewModel::updateMaxTokens,
@@ -135,6 +143,8 @@ private fun LocalMindApp(
                     onUpdateGitHubRepo = viewModel::updateGitHubUpdateRepo,
                     onUpdateAutoCheckUpdates = viewModel::updateAutoCheckUpdates,
                     onCheckForUpdates = { repo -> viewModel.checkForGitHubUpdates(repoOverride = repo, silent = false) },
+                    onDownloadUpdateApk = viewModel::startApkUpdateDownload,
+                    onCancelUpdateDownload = viewModel::cancelApkUpdateDownload,
                     onTestConnection = { provider, url, key ->
                         viewModel.refreshConnection(provider, url, key)
                     },

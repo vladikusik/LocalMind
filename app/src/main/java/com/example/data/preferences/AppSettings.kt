@@ -48,6 +48,11 @@ data class AppSettings(
     val localEngine: LocalInferenceEngine = LocalInferenceEngine.AUTO,
     val localBackend: LocalHardwareBackend = LocalHardwareBackend.NPU,
     val localThreads: Int = 4,
+    val localGpuLayers: Int = -1,
+    val enableVulkanGpu: Boolean = true,
+    val enableSpeculativeDecoding: Boolean = true,
+    val speculativeDraftTokens: Int = 4,
+    val speculativeDraftModelId: String = "",
     val activeAgentId: String = "",
     val enableBuiltInTools: Boolean = true,
     val huggingFaceToken: String = "",
@@ -72,7 +77,7 @@ data class AppSettings(
     val imageClipSkip: Int = 1,
     val imageBatchCount: Int = 1,
     val imageHiResFix: Boolean = false,
-    val githubUpdateRepo: String = "",
+    val githubUpdateRepo: String = DEFAULT_GITHUB_UPDATE_REPO,
     val autoCheckUpdates: Boolean = true,
     val dismissedUpdateTag: String = ""
 ) {
@@ -89,6 +94,7 @@ data class AppSettings(
 
     companion object {
         const val DEFAULT_BASE_URL = "http://10.0.2.2:1234/v1"
+        const val DEFAULT_GITHUB_UPDATE_REPO = "vladikusik/LocalMind"
         const val DEFAULT_SYSTEM_PROMPT =
             "You are a helpful, accurate, and concise AI assistant. Format responses cleanly using Markdown when appropriate, including fenced code blocks with language identifiers."
     }
@@ -102,6 +108,11 @@ class SettingsRepository(private val context: Context) {
         val LOCAL_ENGINE = stringPreferencesKey("local_engine")
         val LOCAL_BACKEND = stringPreferencesKey("local_backend")
         val LOCAL_THREADS = intPreferencesKey("local_threads")
+        val LOCAL_GPU_LAYERS = intPreferencesKey("local_gpu_layers")
+        val ENABLE_VULKAN_GPU = booleanPreferencesKey("enable_vulkan_gpu")
+        val ENABLE_SPECULATIVE = booleanPreferencesKey("enable_speculative_decoding")
+        val SPECULATIVE_DRAFT_TOKENS = intPreferencesKey("speculative_draft_tokens")
+        val SPECULATIVE_DRAFT_MODEL_ID = stringPreferencesKey("speculative_draft_model_id")
         val ACTIVE_AGENT_ID = stringPreferencesKey("active_agent_id")
         val ENABLE_BUILTIN_TOOLS = booleanPreferencesKey("enable_builtin_tools")
         val HF_TOKEN = stringPreferencesKey("hf_token")
@@ -161,6 +172,11 @@ class SettingsRepository(private val context: Context) {
             localEngine = LocalInferenceEngine.fromId(prefs[Keys.LOCAL_ENGINE]),
             localBackend = LocalHardwareBackend.fromId(prefs[Keys.LOCAL_BACKEND]),
             localThreads = (prefs[Keys.LOCAL_THREADS] ?: 4).coerceIn(1, 8),
+            localGpuLayers = (prefs[Keys.LOCAL_GPU_LAYERS] ?: -1).coerceIn(-1, 99),
+            enableVulkanGpu = prefs[Keys.ENABLE_VULKAN_GPU] ?: true,
+            enableSpeculativeDecoding = prefs[Keys.ENABLE_SPECULATIVE] ?: true,
+            speculativeDraftTokens = (prefs[Keys.SPECULATIVE_DRAFT_TOKENS] ?: 4).coerceIn(1, 8),
+            speculativeDraftModelId = prefs[Keys.SPECULATIVE_DRAFT_MODEL_ID] ?: "",
             activeAgentId = prefs[Keys.ACTIVE_AGENT_ID] ?: "",
             enableBuiltInTools = prefs[Keys.ENABLE_BUILTIN_TOOLS] ?: true,
             huggingFaceToken = prefs[Keys.HF_TOKEN] ?: "",
@@ -189,7 +205,9 @@ class SettingsRepository(private val context: Context) {
             imageClipSkip = (prefs[Keys.IMAGE_CLIP_SKIP] ?: 1).coerceIn(1, 2),
             imageBatchCount = (prefs[Keys.IMAGE_BATCH_COUNT] ?: 1).coerceIn(1, 4),
             imageHiResFix = prefs[Keys.IMAGE_HIRES_FIX] ?: false,
-            githubUpdateRepo = prefs[Keys.GITHUB_UPDATE_REPO] ?: "",
+            githubUpdateRepo = prefs[Keys.GITHUB_UPDATE_REPO]
+                ?.takeIf { it.isNotBlank() }
+                ?: AppSettings.DEFAULT_GITHUB_UPDATE_REPO,
             autoCheckUpdates = prefs[Keys.AUTO_CHECK_UPDATES] ?: true,
             dismissedUpdateTag = prefs[Keys.DISMISSED_UPDATE_TAG] ?: ""
         )
@@ -225,6 +243,26 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun updateLocalThreads(threads: Int) {
         context.settingsDataStore.edit { it[Keys.LOCAL_THREADS] = threads.coerceIn(1, 8) }
+    }
+
+    suspend fun updateLocalGpuLayers(gpuLayers: Int) {
+        context.settingsDataStore.edit { it[Keys.LOCAL_GPU_LAYERS] = gpuLayers.coerceIn(-1, 99) }
+    }
+
+    suspend fun updateEnableVulkanGpu(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.ENABLE_VULKAN_GPU] = enabled }
+    }
+
+    suspend fun updateEnableSpeculativeDecoding(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.ENABLE_SPECULATIVE] = enabled }
+    }
+
+    suspend fun updateSpeculativeDraftTokens(tokens: Int) {
+        context.settingsDataStore.edit { it[Keys.SPECULATIVE_DRAFT_TOKENS] = tokens.coerceIn(1, 8) }
+    }
+
+    suspend fun updateSpeculativeDraftModelId(modelId: String) {
+        context.settingsDataStore.edit { it[Keys.SPECULATIVE_DRAFT_MODEL_ID] = modelId }
     }
 
     suspend fun updateActiveAgentId(agentId: String) {

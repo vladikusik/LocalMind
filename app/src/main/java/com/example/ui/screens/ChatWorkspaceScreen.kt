@@ -108,8 +108,8 @@ import com.example.data.localmodel.LocalInferenceEngine
 import com.example.data.network.ApiProtocol
 import com.example.data.network.ApiProvider
 import com.example.data.updates.GitHubReleaseInfo
-import com.example.data.updates.GitHubUpdateManager
 import com.example.data.updates.UpdateCheckState
+import com.example.ui.components.UpdateCenterBottomSheet
 import com.example.ui.components.ChatComposerBar
 import com.example.ui.components.ChatMessageItem
 import com.example.ui.components.EmptyChatWelcome
@@ -153,6 +153,7 @@ fun ChatWorkspaceScreen(
     val composerText by viewModel.composerText.collectAsStateWithLifecycle()
     val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
+    val updateDownloadState by viewModel.updateDownloadState.collectAsStateWithLifecycle()
     val uiNotice by viewModel.uiNotice.collectAsStateWithLifecycle()
 
     val availableUpdate = remember(updateState, settings.dismissedUpdateTag) {
@@ -160,13 +161,10 @@ fun ChatWorkspaceScreen(
         avail?.takeIf { it.tagName != settings.dismissedUpdateTag }
     }
 
+    var activeUpdateSheetRelease by remember { mutableStateOf<GitHubReleaseInfo?>(null) }
+
     val openUpdateDownload: (GitHubReleaseInfo) -> Unit = { release ->
-        val url = release.apkDownloadUrl ?: release.htmlUrl
-        if (GitHubUpdateManager.isTrustedGitHubUrl(url)) {
-            runCatching {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            }
-        }
+        activeUpdateSheetRelease = release
     }
 
     val activeAgentName = remember(agents, settings.activeAgentId) {
@@ -485,6 +483,17 @@ fun ChatWorkspaceScreen(
                 onOpenSettings()
             },
             onDismiss = { showModelSheet = false }
+        )
+    }
+
+    activeUpdateSheetRelease?.let { release ->
+        UpdateCenterBottomSheet(
+            release = release,
+            downloadState = updateDownloadState,
+            onStartDownload = viewModel::startApkUpdateDownload,
+            onCancelDownload = viewModel::cancelApkUpdateDownload,
+            onSkipVersion = viewModel::dismissUpdateTag,
+            onDismiss = { activeUpdateSheetRelease = null }
         )
     }
 }

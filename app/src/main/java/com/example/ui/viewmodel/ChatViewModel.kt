@@ -23,8 +23,11 @@ import com.example.data.imagegen.LocalDreamCatalog
 import com.example.data.imagegen.LocalImageGenerator
 import com.example.data.imagegen.MaskStroke
 import com.example.data.imagegen.UpscaleMethod
+import android.app.DownloadManager
+import com.example.data.updates.GitHubReleaseInfo
 import com.example.data.updates.GitHubUpdateManager
 import com.example.data.updates.UpdateCheckState
+import com.example.data.updates.UpdateDownloadState
 import com.example.data.local.AppDatabase
 import com.example.data.local.ConversationSummary
 import com.example.data.local.DownloadedModelEntity
@@ -266,9 +269,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _updateState = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
     val updateState: StateFlow<UpdateCheckState> = _updateState.asStateFlow()
 
+    private val _updateDownloadState = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
+    val updateDownloadState: StateFlow<UpdateDownloadState> = _updateDownloadState.asStateFlow()
+
     private var generationJob: Job? = null
     private var sandboxAiJob: Job? = null
     private var imageGenJob: Job? = null
+    private var updateDownloadPollJob: Job? = null
     private val downloadJobs = mutableMapOf<String, Job>()
 
     init {
@@ -959,6 +966,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateLocalThreads(threads: Int) {
         viewModelScope.launch { settingsRepository.updateLocalThreads(threads) }
+    }
+
+    fun updateLocalGpuLayers(gpuLayers: Int) {
+        viewModelScope.launch { settingsRepository.updateLocalGpuLayers(gpuLayers) }
+    }
+
+    fun updateEnableVulkanGpu(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.updateEnableVulkanGpu(enabled) }
+    }
+
+    fun updateEnableSpeculativeDecoding(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.updateEnableSpeculativeDecoding(enabled) }
+    }
+
+    fun updateSpeculativeDraftTokens(tokens: Int) {
+        viewModelScope.launch { settingsRepository.updateSpeculativeDraftTokens(tokens) }
+    }
+
+    fun updateSpeculativeDraftModelId(modelId: String) {
+        viewModelScope.launch { settingsRepository.updateSpeculativeDraftModelId(modelId) }
     }
 
     fun updateHuggingFaceToken(token: String) {
@@ -1964,15 +1991,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun checkForGitHubUpdates(repoOverride: String? = null, silent: Boolean = false) {
-        val rawRepo = (repoOverride ?: settings.value.githubUpdateRepo).trim()
-        if (rawRepo.isBlank()) {
-            if (!silent) {
-                _updateState.value = UpdateCheckState.Error(
-                    "Enter a GitHub repository (owner/repo) first."
-                )
-            }
-            return
-        }
+        val rawRepo = (repoOverride ?: settings.value.githubUpdateRepo)
+            .trim()
+            .ifBlank { AppSettings.DEFAULT_GITHUB_UPDATE_REPO }
 
         viewModelScope.launch {
             val normalized = GitHubUpdateManager.normalizeRepoSlug(rawRepo)
@@ -1982,14 +2003,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _updateState.value = UpdateCheckState.Checking
             val result = githubUpdateManager.checkLatestRelease(rawRepo)
             result.fold(
-                onSuccess = { release ->
+                onSuccess = { (release, recentReleases) ->
                     if (release.isNewer) {
-                        _updateState.value = UpdateCheckState.UpdateAvailable(release)
+                        _updateState.value = UpdateCheckState.UpdateAvailable(
+                            release = release,
+                            recentReleases = recentReleases
+                        )
                     } else {
                         _updateState.value = UpdateCheckState.UpToDate(
                             currentVersion = BuildConfig.VERSION_NAME,
+                            currentBuild = BuildConfig.VERSION_CODE,
                             latestTag = release.tagName,
-                            htmlUrl = release.htmlUrl
+                            htmlUrl = release.htmlUrl,
+                            recentReleases = recentReleases
                         )
                     }
                 },
@@ -2004,6 +2030,82 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             )
         }
+    }
+
+    fun startApkUpdateDownload(release: GitHubReleaseInfo) {
+        val ctx = getApplication<Application>()
+        updateDownloadPollJob?.cancel()
+
+        val enqueueResult = githubUpdateManager.enqueueApkDownload(ctx, release)
+        enqueueResult.fold(
+            onSuccess = { (downloadId, fileName) ->
+                _updateDownloadState.value = UpdateDownloadState.Downloading(
+                    releaseTag = release.tagName,
+                    fileName = fileName,
+                    downloadedBytes = 0L,
+                    totalBytes = release.apkSizeBytes,
+                    downloadId = downloadId
+                )
+                updateDownloadPollJob = viewModelScope.launch {
+                    while (true) {
+                        val snap = githubUpdateManager.queryDownloadStatus(ctx, downloadId)
+                        if (snap == null) {
+                            _updateDownloadState.value = UpdateDownloadState.Idle
+                            break
+                        }
+                        when (snap.status) {
+                            DownloadManager.STATUS_SUCCESSFUL -> {
+                                _updateDownloadState.value = UpdateDownloadState.Completed(
+                                    releaseTag = release.tagName,
+                                    fileName = fileName,
+                                    downloadId = downloadId
+                                )
+                                _uiNotice.value = "APK $fileName saved to Downloads. Tap to update in-place."
+                                break
+                            }
+
+                            DownloadManager.STATUS_FAILED -> {
+                                _updateDownloadState.value = UpdateDownloadState.Failed(
+                                    releaseTag = release.tagName,
+                                    message = "Download interrupted (code ${snap.reason}). Try browser download."
+                                )
+                                break
+                            }
+
+                            else -> {
+                                _updateDownloadState.value = UpdateDownloadState.Downloading(
+                                    releaseTag = release.tagName,
+                                    fileName = fileName,
+                                    downloadedBytes = snap.bytesDownloaded,
+                                    totalBytes = if (snap.bytesTotal > 0L) snap.bytesTotal else release.apkSizeBytes,
+                                    downloadId = downloadId
+                                )
+                            }
+                        }
+                        kotlinx.coroutines.delay(350L)
+                    }
+                }
+            },
+            onFailure = { err ->
+                if (err.message == "DIRECT_BROWSER_FALLBACK") {
+                    val target = release.apkDownloadUrl ?: release.htmlUrl
+                    GitHubUpdateManager.openTrustedUrlInBrowser(ctx, target)
+                    _updateDownloadState.value = UpdateDownloadState.Idle
+                } else {
+                    _updateDownloadState.value = UpdateDownloadState.Failed(
+                        releaseTag = release.tagName,
+                        message = err.localizedMessage ?: "Failed to start APK download."
+                    )
+                }
+            }
+        )
+    }
+
+    fun cancelApkUpdateDownload() {
+        val current = _updateDownloadState.value as? UpdateDownloadState.Downloading ?: return
+        updateDownloadPollJob?.cancel()
+        githubUpdateManager.cancelDownload(getApplication(), current.downloadId)
+        _updateDownloadState.value = UpdateDownloadState.Idle
     }
 
     private fun isLikelyDiffusionName(name: String): Boolean {

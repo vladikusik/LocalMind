@@ -312,7 +312,7 @@
     <string name="settings_section_updates">Оновлення через GitHub</string>
     <string name="updates_current_version">Встановлена версія: v%1$s (збірка %2$d)</string>
     <string name="updates_repo_label">Репозиторій GitHub (owner/repo)</string>
-    <string name="updates_repo_placeholder">username/LocalMind</string>
+    <string name="updates_repo_placeholder">vladikusik/LocalMind</string>
     <string name="updates_auto_check">Автоперевірка оновлень при запуску</string>
     <string name="updates_auto_check_desc">Перевіряє останній GitHub Release та наявність нового APK</string>
     <string name="updates_check_now">Перевірити оновлення</string>
@@ -320,7 +320,31 @@
     <string name="updates_up_to_date">У вас найновіша версія (остання: %1$s)</string>
     <string name="updates_available_title">Доступне оновлення: %1$s</string>
     <string name="updates_download_apk">Завантажити APK</string>
-    <string name="updates_view_release">Відкрити реліз</string>
-    <string name="updates_banner_text">Доступне оновлення %1$s на GitHub</string>
-    <string name="updates_hint">Вкажіть ваш публічний GitHub-репозиторій, куди ви завантажили проєкт. Нові APK збірки з GitHub Actions з’являтимуться тут автоматично.</string>
+    <string name="updates_download_in_app">Завантажити оновлення</string>
+    <string name="updates_view_release">Реліз на GitHub</string>
+    <string name="updates_open_browser">Браузер</string>
+    <string name="updates_banner_text">Доступне оновлення %1$s — натисніть для оновлення</string>
+    <string name="updates_hint">Підключено до vladikusik/LocalMind. Кожна збірка GitHub Actions автоматично підвищує номер версії з тим самим підписом — Android оновлює додаток поверх без перевстановлення.</string>
+    <string name="updates_inplace_note">Оновлення встановлюється поверх — усі чати, завантажені моделі та налаштування збережуться без видалення додатку.</string>
+    <string name="updates_changelog_title">Що нового</string>
+    <string name="updates_downloading_title">Завантаження APK</string>
+    <string name="updates_ready_to_install">Завантажено: %1$s</string>
+    <string name="updates_tap_notification_hint">Натисніть на сповіщення про завантаження або відкрийте «Завантаження» й тапніть на APK, щоб оновити поверх.</string>
+    <string name="updates_open_downloads">Відкрити «Завантаження» та оновити</string>
+    <string name="updates_skip_version">Пропустити цю версію</string>
+    <string name="updates_recent_releases">Останні релізи</string>
+
+    <!-- Vulkan GPU, CPU+GPU Layer Offloading & Speculative Decoding -->
+    <string name="settings_vulkan_gpu_title">Прискорення Vulkan GPU</string>
+    <string name="settings_vulkan_unavailable">Апаратний Vulkan Compute недоступний на цьому пристрої</string>
+    <string name="settings_gpu_layers_title">Розподіл шарів (CPU + GPU)</string>
+    <string name="settings_gpu_layers_desc">Виносить шари GGUF-моделі на Vulkan GPU, а решту залишає на CPU — максимум швидкості без переповнення пам’яті.</string>
+    <string name="settings_gpu_layers_auto">Авто</string>
+    <string name="settings_gpu_layers_cpu_only">Лише CPU</string>
+    <string name="settings_gpu_layers_all">Усі на GPU</string>
+    <string name="settings_speculative_title">Speculative Decoding (MTP / Draft)</string>
+    <string name="settings_speculative_desc">Генерує кілька токенів за один крок через вбудовані MTP-голови (Qwen3 / GLM-4) або легку чернеткову GGUF-модель.</string>
+    <string name="settings_speculative_draft_tokens">Кількість токенів наперед</string>
+    <string name="settings_speculative_draft_model">Чернеткова модель (Draft GGUF)</string>
+    <string name="settings_speculative_auto_mtp">Авто (MTP-голова)</string>
 </resources>

@@ -13,6 +13,10 @@ data class HardwareAcceleratorInfo(
     val npuDetail: String,
     val hasOpenCl: Boolean,
     val hasVulkan: Boolean,
+    val vulkanVersion: String,
+    val vulkanComputeSupported: Boolean,
+    val gpuFamily: String,
+    val recommendedHybridLayers: Int,
     val hasNnapi: Boolean,
     val qnnBundled: Boolean,
     val hexagonArch: String,
@@ -27,6 +31,7 @@ object HardwareAcceleratorInspector {
     fun inspect(context: Context): HardwareAcceleratorInfo {
         // Configure ADSP_LIBRARY_PATH and inspect bundled QNN HTP / LiteRT Dispatch libs immediately
         val qnnStatus = QnnRuntimeConfigurator.configureAndInspect(context)
+        val vulkanStatus = VulkanGpuConfigurator.configureAndInspect(context, enableVulkan = true)
 
         val socManufacturer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Build.SOC_MANUFACTURER.orEmpty().trim()
@@ -68,7 +73,8 @@ object HardwareAcceleratorInspector {
             "/system/vendor/lib64/libOpenCL.so",
             "/system/lib64/libOpenCL.so"
         )
-        val hasVulkan = context.packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL)
+        val hasVulkan = vulkanStatus.supported ||
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL)
         val hasNnapi = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
 
         val qnnBundledReady = qnnStatus.isQnnHtpBundled || qnnStatus.isLiteRtDispatchBundled
@@ -79,12 +85,12 @@ object HardwareAcceleratorInspector {
                 val detail = buildString {
                     append(qnnStatus.hexagonArch)
                     if (qnnBundledReady) {
-                        append(" · QNN HTP bundled (${qnnStatus.bundledQnnLibCount} libs)")
+                        append(" · QNN HTP (${qnnStatus.bundledQnnLibCount} libs)")
                     } else if (hasSystemQnn) {
                         append(" · System CDSP/QNN driver")
                     }
-                    if (qnnStatus.adspPathConfigured) {
-                        append(" · ADSP ready")
+                    if (vulkanStatus.supported) {
+                        append(" · ${vulkanStatus.versionLabel} (${vulkanStatus.gpuFamily})")
                     }
                 }
                 Triple("Qualcomm Hexagon NPU (QNN HTP)", true, detail)
@@ -96,7 +102,7 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "Google Tensor TPU / NPU",
                     true,
-                    "Google Tensor NPU · LiteRT-LM NPU delegate ready"
+                    "Google Tensor NPU · ${vulkanStatus.versionLabel} GPU Compute"
                 )
             }
 
@@ -104,7 +110,11 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "MediaTek APU (NeuroPilot)",
                     true,
-                    if (hasNeuron) "NeuroPilot APU driver detected" else "MediaTek Dimensity · LiteRT NPU ready"
+                    if (hasNeuron) {
+                        "NeuroPilot APU · ${vulkanStatus.versionLabel} (${vulkanStatus.gpuFamily})"
+                    } else {
+                        "MediaTek Dimensity · ${vulkanStatus.versionLabel} GPU Compute"
+                    }
                 )
             }
 
@@ -112,7 +122,7 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "Samsung Exynos NPU",
                     true,
-                    "Exynos NPU / NNAPI · LiteRT delegate ready"
+                    "Exynos NPU · ${vulkanStatus.versionLabel} (${vulkanStatus.gpuFamily})"
                 )
             }
 
@@ -120,7 +130,7 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "NNAPI / Virtual NPU",
                     false,
-                    "Emulator — NPU auto-falls back to GPU/CPU (QNN libs bundled: ${qnnStatus.bundledQnnLibCount})"
+                    "Emulator — ${vulkanStatus.versionLabel} / CPU fallback (QNN libs: ${qnnStatus.bundledQnnLibCount})"
                 )
             }
 
@@ -129,9 +139,9 @@ object HardwareAcceleratorInspector {
                     "Android NNAPI / NPU",
                     true,
                     if (qnnBundledReady) {
-                        "QNN/LiteRT runtime bundled (${qnnStatus.bundledQnnLibCount} libs) · auto GPU/CPU fallback"
+                        "QNN/LiteRT (${qnnStatus.bundledQnnLibCount} libs) · ${vulkanStatus.versionLabel}"
                     } else {
-                        "LiteRT NPU with automatic GPU/CPU fallback"
+                        "LiteRT NPU · ${vulkanStatus.versionLabel} GPU fallback"
                     }
                 )
             }
@@ -140,7 +150,7 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "CPU / GPU Only",
                     false,
-                    "NPU unavailable on API < 27"
+                    "NPU unavailable · ${vulkanStatus.versionLabel}"
                 )
             }
         }
@@ -156,6 +166,10 @@ object HardwareAcceleratorInspector {
             npuDetail = npuDetail,
             hasOpenCl = hasOpenCl,
             hasVulkan = hasVulkan,
+            vulkanVersion = vulkanStatus.versionLabel,
+            vulkanComputeSupported = vulkanStatus.computeSupported,
+            gpuFamily = vulkanStatus.gpuFamily,
+            recommendedHybridLayers = vulkanStatus.recommendedHybridLayers,
             hasNnapi = hasNnapi,
             qnnBundled = qnnBundledReady,
             hexagonArch = qnnStatus.hexagonArch,

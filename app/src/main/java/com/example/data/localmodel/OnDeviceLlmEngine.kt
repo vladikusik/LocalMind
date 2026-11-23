@@ -71,6 +71,9 @@ class OnDeviceLlmEngine(private val context: Context) {
     @Volatile
     private var liteRtEngine: Engine? = null
 
+    @Volatile
+    private var activeSpeculativeLabel: String? = null
+
     private val lock = Any()
 
     fun streamCompletion(
@@ -80,7 +83,12 @@ class OnDeviceLlmEngine(private val context: Context) {
         hardwareBackend: LocalHardwareBackend,
         threads: Int,
         temperature: Float,
-        maxTokens: Int
+        maxTokens: Int,
+        gpuLayers: Int = -1,
+        enableVulkanGpu: Boolean = true,
+        enableSpeculativeDecoding: Boolean = true,
+        speculativeDraftTokens: Int = 4,
+        speculativeDraftModelPath: String? = null
     ): Flow<StreamEvent> {
         val modelFile = File(model.localPath)
         if (!modelFile.exists()) {
@@ -103,7 +111,12 @@ class OnDeviceLlmEngine(private val context: Context) {
                 hardwareBackend = hardwareBackend,
                 threads = threads,
                 temperature = temperature,
-                maxTokens = maxTokens
+                maxTokens = maxTokens,
+                requestedGpuLayers = gpuLayers,
+                enableVulkanGpu = enableVulkanGpu,
+                enableSpeculativeDecoding = enableSpeculativeDecoding,
+                speculativeDraftTokens = speculativeDraftTokens,
+                speculativeDraftModelPath = speculativeDraftModelPath
             )
 
             LocalInferenceEngine.LITERT_LM -> streamWithLiteRtLm(
@@ -111,7 +124,8 @@ class OnDeviceLlmEngine(private val context: Context) {
                 modelFile = modelFile,
                 messages = messages,
                 hardwareBackend = hardwareBackend,
-                temperature = temperature
+                temperature = temperature,
+                enableVulkanGpu = enableVulkanGpu
             )
 
             LocalInferenceEngine.MEDIAPIPE_GENAI, LocalInferenceEngine.AUTO -> streamWithMediaPipe(
@@ -126,8 +140,8 @@ class OnDeviceLlmEngine(private val context: Context) {
     }
 
     // -------------------------------------------------------------------------
-    // 1. GGUF / llama.cpp (Fixed param-before-init order, RAM-adaptive retry,
-    //    GGUF magic verification, per-architecture chat templates, stop-token cut)
+    // 1. GGUF / llama.cpp (Vulkan GPU + CPU+GPU Layer Offloading + MTP Speculative Decoding,
+    //    RAM-adaptive retry, GGUF magic verification, per-architecture chat templates)
     // -------------------------------------------------------------------------
 
     private data class LlamaInitProfile(
@@ -135,6 +149,7 @@ class OnDeviceLlmEngine(private val context: Context) {
         val contextLength: Int,
         val batchSize: Int,
         val threads: Int,
+        val gpuLayers: Int,
         val useMmap: Boolean,
         val flashAttention: Boolean
     )
@@ -146,7 +161,12 @@ class OnDeviceLlmEngine(private val context: Context) {
         hardwareBackend: LocalHardwareBackend,
         threads: Int,
         temperature: Float,
-        maxTokens: Int
+        maxTokens: Int,
+        requestedGpuLayers: Int,
+        enableVulkanGpu: Boolean,
+        enableSpeculativeDecoding: Boolean,
+        speculativeDraftTokens: Int,
+        speculativeDraftModelPath: String?
     ): Flow<StreamEvent> = callbackFlow {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             close(IOException("llama.cpp engine requires Android 8.0 (API 26) or newer."))
@@ -169,6 +189,7 @@ class OnDeviceLlmEngine(private val context: Context) {
             return@callbackFlow
         }
 
+        val vulkanStatus = VulkanGpuConfigurator.configureAndInspect(context, enableVulkan = enableVulkanGpu)
         val optimalThreads = computeOptimalLlamaThreads(threads)
         val availRamMb = queryAvailableRamMb()
         val modelMb = (modelFile.length() / (1024L * 1024L)).coerceAtLeast(1L)
@@ -178,9 +199,39 @@ class OnDeviceLlmEngine(private val context: Context) {
             else -> 1536
         }
 
-        val requestedKey = "${modelFile.absolutePath}|$optimalThreads|$primaryCtx|${hardwareBackend.id}"
+        // Resolve effective CPU+GPU layer offloading count
+        val effectiveGpuLayers = when {
+            !enableVulkanGpu || !vulkanStatus.supported -> 0
+            requestedGpuLayers == 0 -> 0
+            requestedGpuLayers > 0 -> requestedGpuLayers.coerceIn(1, 99)
+            // requestedGpuLayers == -1 (Auto)
+            hardwareBackend == LocalHardwareBackend.CPU -> 0
+            availRamMb >= 3000L -> -1 // Full GPU offload via Vulkan
+            else -> vulkanStatus.recommendedHybridLayers
+        }
+
+        val validDraftPath = speculativeDraftModelPath
+            ?.takeIf { it.isNotBlank() && it != modelFile.absolutePath }
+            ?.let { path ->
+                val f = File(path)
+                if (f.exists() && validateGgufFile(f) == null) path else null
+            }
+
+        val requestedKey = listOf(
+            modelFile.absolutePath,
+            optimalThreads,
+            primaryCtx,
+            hardwareBackend.id,
+            effectiveGpuLayers,
+            enableVulkanGpu,
+            enableSpeculativeDecoding,
+            speculativeDraftTokens,
+            validDraftPath.orEmpty()
+        ).joinToString("|")
+
         val safeTemp = temperature.coerceIn(0.05f, 2.0f)
         val safeMaxTokens = maxTokens.coerceIn(128, 2048)
+        val safeDraftLen = speculativeDraftTokens.coerceIn(1, 8)
         val finished = AtomicBoolean(false)
         val doneLatch = CountDownLatch(1)
 
@@ -192,39 +243,73 @@ class OnDeviceLlmEngine(private val context: Context) {
                         unloadLiteRtLocked()
                         unloadLlamaLocked()
 
-                        val profiles = listOf(
-                            LlamaInitProfile(
-                                label = "llama.cpp · ${optimalThreads}T FA",
-                                contextLength = primaryCtx,
-                                batchSize = 256,
-                                threads = optimalThreads,
-                                useMmap = true,
-                                flashAttention = true
-                            ),
-                            LlamaInitProfile(
-                                label = "llama.cpp · ${optimalThreads}T",
-                                contextLength = minOf(primaryCtx, 2048),
-                                batchSize = 128,
-                                threads = optimalThreads,
-                                useMmap = true,
-                                flashAttention = false
-                            ),
-                            LlamaInitProfile(
-                                label = "llama.cpp · Safe Low-RAM",
-                                contextLength = 1024,
-                                batchSize = 64,
-                                threads = minOf(4, optimalThreads),
-                                useMmap = false,
-                                flashAttention = false
+                        val gpuTag = when {
+                            effectiveGpuLayers == -1 -> "Vulkan All-GPU"
+                            effectiveGpuLayers > 0 -> "Vulkan ${effectiveGpuLayers}L+CPU"
+                            else -> "CPU ${optimalThreads}T"
+                        }
+                        val hybridFallbackLayers = when {
+                            effectiveGpuLayers == -1 -> vulkanStatus.recommendedHybridLayers.coerceIn(8, 24)
+                            effectiveGpuLayers > 8 -> (effectiveGpuLayers / 2).coerceAtLeast(4)
+                            else -> 0
+                        }
+
+                        val profiles = buildList {
+                            add(
+                                LlamaInitProfile(
+                                    label = "$gpuTag · FA",
+                                    contextLength = primaryCtx,
+                                    batchSize = if (effectiveGpuLayers != 0) 512 else 256,
+                                    threads = optimalThreads,
+                                    gpuLayers = effectiveGpuLayers,
+                                    useMmap = true,
+                                    flashAttention = true
+                                )
                             )
-                        )
+                            if (hybridFallbackLayers > 0) {
+                                add(
+                                    LlamaInitProfile(
+                                        label = "Vulkan ${hybridFallbackLayers}L+CPU",
+                                        contextLength = minOf(primaryCtx, 2048),
+                                        batchSize = 256,
+                                        threads = optimalThreads,
+                                        gpuLayers = hybridFallbackLayers,
+                                        useMmap = true,
+                                        flashAttention = false
+                                    )
+                                )
+                            }
+                            add(
+                                LlamaInitProfile(
+                                    label = "CPU ${optimalThreads}T",
+                                    contextLength = minOf(primaryCtx, 2048),
+                                    batchSize = 128,
+                                    threads = optimalThreads,
+                                    gpuLayers = 0,
+                                    useMmap = true,
+                                    flashAttention = false
+                                )
+                            )
+                            add(
+                                LlamaInitProfile(
+                                    label = "CPU Safe Low-RAM",
+                                    contextLength = 1024,
+                                    batchSize = 64,
+                                    threads = minOf(4, optimalThreads),
+                                    gpuLayers = 0,
+                                    useMmap = false,
+                                    flashAttention = false
+                                )
+                            )
+                        }
 
                         var loadedProfile: LlamaInitProfile? = null
                         var lastErr: Throwable? = null
                         for (profile in profiles) {
                             try {
+                                runCatching { LlamaBridge.shutdownMtp() }
                                 runCatching { LlamaBridge.shutdown() }
-                                // CRITICAL: Always apply hardware/context params BEFORE initGenerateModel!
+                                // CRITICAL: Always apply hardware/gpuLayers/context params BEFORE initGenerateModel!
                                 LlamaBridge.updateGenerateParams(
                                     temperature = safeTemp,
                                     maxTokens = safeMaxTokens,
@@ -235,7 +320,8 @@ class OnDeviceLlmEngine(private val context: Context) {
                                     numThreads = profile.threads,
                                     useMmap = profile.useMmap,
                                     flashAttention = profile.flashAttention,
-                                    batchSize = profile.batchSize
+                                    batchSize = profile.batchSize,
+                                    gpuLayers = profile.gpuLayers
                                 )
                                 val ok = LlamaBridge.initGenerateModel(modelFile.absolutePath)
                                 if (ok) {
@@ -250,18 +336,41 @@ class OnDeviceLlmEngine(private val context: Context) {
                         if (loadedProfile == null) {
                             throw IOException(
                                 "llama.cpp failed to load '${model.fileName}' (${modelMb} MB, free RAM ${availRamMb} MB). " +
-                                    "Try a smaller quantization (Q4_K_M / Q4_0, 1B–3B) or a QNN NPU .litertlm model." +
+                                    "Try reducing GPU Layers or choosing a smaller quantization (Q4_K_M / Q4_0)." +
                                     (lastErr?.localizedMessage?.let { " Details: $it" } ?: ""),
                                 lastErr
                             )
                         }
 
+                        // Initialize Speculative Decoding (MTP / Draft Head) AFTER trunk model init
+                        activeSpeculativeLabel = null
+                        if (enableSpeculativeDecoding) {
+                            val mtpTargetPath = validDraftPath ?: modelFile.absolutePath
+                            val mtpReady = runCatching {
+                                LlamaBridge.initMtp(mtpTargetPath, draftLen = safeDraftLen)
+                            }.getOrDefault(false)
+                            if (mtpReady) {
+                                activeSpeculativeLabel = if (validDraftPath != null) {
+                                    "Spec Draft x$safeDraftLen"
+                                } else {
+                                    "MTP x$safeDraftLen"
+                                }
+                            }
+                        }
+
                         loadedLlamaPath = modelFile.absolutePath
                         loadedLlamaProfileKey = requestedKey
                         loadedLlamaProfile = loadedProfile
-                        activeLlamaProfileLabel = loadedProfile.label
+                        activeLlamaProfileLabel = buildString {
+                            append("llama.cpp · ")
+                            append(loadedProfile.label)
+                            activeSpeculativeLabel?.let {
+                                append(" · ")
+                                append(it)
+                            }
+                        }
                     } else {
-                        // Model already loaded: preserve active profile's exact memory/context settings
+                        // Model already loaded: preserve active profile's exact memory/GPU settings
                         val activeProfile = loadedLlamaProfile
                         runCatching {
                             LlamaBridge.updateGenerateParams(
@@ -274,7 +383,8 @@ class OnDeviceLlmEngine(private val context: Context) {
                                 numThreads = activeProfile?.threads ?: optimalThreads,
                                 useMmap = activeProfile?.useMmap ?: true,
                                 flashAttention = activeProfile?.flashAttention ?: true,
-                                batchSize = activeProfile?.batchSize ?: 256
+                                batchSize = activeProfile?.batchSize ?: 256,
+                                gpuLayers = activeProfile?.gpuLayers ?: 0
                             )
                         }
                     }
@@ -390,7 +500,8 @@ class OnDeviceLlmEngine(private val context: Context) {
         modelFile: File,
         messages: List<ChatMessageDto>,
         hardwareBackend: LocalHardwareBackend,
-        temperature: Float
+        temperature: Float,
+        enableVulkanGpu: Boolean
     ): Flow<StreamEvent> = callbackFlow {
         val ext = model.format.lowercase()
         if (ext != "litertlm" && ext != "task") {
@@ -404,7 +515,7 @@ class OnDeviceLlmEngine(private val context: Context) {
         }
 
         val engine = try {
-            getOrCreateLiteRtEngine(modelFile.absolutePath, hardwareBackend)
+            getOrCreateLiteRtEngine(modelFile.absolutePath, hardwareBackend, enableVulkanGpu)
         } catch (t: Throwable) {
             close(IOException("LiteRT-LM NPU init error: ${t.localizedMessage ?: t.javaClass.simpleName}", t))
             return@callbackFlow
@@ -549,7 +660,8 @@ class OnDeviceLlmEngine(private val context: Context) {
 
     private fun getOrCreateLiteRtEngine(
         modelPath: String,
-        hardwareBackend: LocalHardwareBackend
+        hardwareBackend: LocalHardwareBackend,
+        enableVulkanGpu: Boolean
     ): Engine {
         synchronized(lock) {
             val existing = liteRtEngine
@@ -563,8 +675,9 @@ class OnDeviceLlmEngine(private val context: Context) {
             unloadLlamaLocked()
             unloadLiteRtLocked()
 
-            // CRITICAL: Set ADSP_LIBRARY_PATH & QNN HTP cache before touching Backend.NPU
+            // CRITICAL: Set ADSP_LIBRARY_PATH, QNN HTP cache & Vulkan GPU env before initializing
             val qnnStatus = QnnRuntimeConfigurator.configureAndInspect(context)
+            val vulkanStatus = VulkanGpuConfigurator.configureAndInspect(context, enableVulkan = enableVulkanGpu)
             val nativeDir = qnnStatus.nativeLibDir
             val cacheDir = qnnStatus.qnnCacheDir
             val npuLabel = if (qnnStatus.isQnnHtpBundled || qnnStatus.isLiteRtDispatchBundled) {
@@ -572,16 +685,21 @@ class OnDeviceLlmEngine(private val context: Context) {
             } else {
                 "NPU"
             }
+            val gpuLabel = if (enableVulkanGpu && vulkanStatus.supported) {
+                "GPU ${vulkanStatus.versionLabel}"
+            } else {
+                "GPU OpenCL"
+            }
 
             val candidates: List<Pair<String, Backend>> = when (hardwareBackend) {
                 LocalHardwareBackend.NPU -> listOf(
                     npuLabel to Backend.NPU(nativeLibraryDir = nativeDir),
-                    "GPU OpenCL (NPU fallback)" to Backend.GPU(),
+                    "$gpuLabel (NPU fallback)" to Backend.GPU(),
                     "CPU (NPU fallback)" to Backend.CPU()
                 )
 
                 LocalHardwareBackend.GPU -> listOf(
-                    "GPU OpenCL" to Backend.GPU(),
+                    gpuLabel to Backend.GPU(),
                     "CPU (GPU fallback)" to Backend.CPU()
                 )
 
@@ -673,10 +791,12 @@ class OnDeviceLlmEngine(private val context: Context) {
     private fun unloadLlamaLocked() {
         if (loadedLlamaPath != null) {
             runCatching { LlamaBridge.nativeCancelGenerate() }
+            runCatching { LlamaBridge.shutdownMtp() }
             runCatching { LlamaBridge.shutdown() }
             loadedLlamaPath = null
             loadedLlamaProfileKey = null
             loadedLlamaProfile = null
+            activeSpeculativeLabel = null
         }
     }
 

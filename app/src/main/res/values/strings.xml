@@ -312,7 +312,7 @@
     <string name="settings_section_updates">App Updates (GitHub)</string>
     <string name="updates_current_version">Installed version: v%1$s (build %2$d)</string>
     <string name="updates_repo_label">GitHub Repository (owner/repo)</string>
-    <string name="updates_repo_placeholder">username/LocalMind</string>
+    <string name="updates_repo_placeholder">vladikusik/LocalMind</string>
     <string name="updates_auto_check">Auto-check updates on launch</string>
     <string name="updates_auto_check_desc">Checks latest GitHub Release tag and APK asset automatically</string>
     <string name="updates_check_now">Check GitHub Releases</string>
@@ -320,7 +320,31 @@
     <string name="updates_up_to_date">Up to date (latest: %1$s)</string>
     <string name="updates_available_title">New update available: %1$s</string>
     <string name="updates_download_apk">Download APK</string>
-    <string name="updates_view_release">View Release</string>
-    <string name="updates_banner_text">Update %1$s available on GitHub</string>
-    <string name="updates_hint">Enter your public GitHub repository where LocalMind is pushed. New releases built by GitHub Actions appear here automatically.</string>
+    <string name="updates_download_in_app">Download Update</string>
+    <string name="updates_view_release">GitHub Release</string>
+    <string name="updates_open_browser">Browser</string>
+    <string name="updates_banner_text">Update %1$s available — tap to update</string>
+    <string name="updates_hint">Connected to vladikusik/LocalMind. Every GitHub Actions build bumps versionCode with the same signing key so Android updates in-place without uninstalling.</string>
+    <string name="updates_inplace_note">In-place upgrade: installs directly over your current version — all chats, downloaded models, and settings stay intact.</string>
+    <string name="updates_changelog_title">What’s New</string>
+    <string name="updates_downloading_title">Downloading APK</string>
+    <string name="updates_ready_to_install">Downloaded: %1$s</string>
+    <string name="updates_tap_notification_hint">Tap the download notification or open Downloads and tap the APK to update in-place.</string>
+    <string name="updates_open_downloads">Open Downloads &amp; Update</string>
+    <string name="updates_skip_version">Skip this version</string>
+    <string name="updates_recent_releases">Recent Releases</string>
+
+    <!-- Vulkan GPU, CPU+GPU Layer Offloading & Speculative Decoding -->
+    <string name="settings_vulkan_gpu_title">Vulkan GPU Acceleration</string>
+    <string name="settings_vulkan_unavailable">Vulkan hardware compute unavailable on this device</string>
+    <string name="settings_gpu_layers_title">Layer Offloading (CPU + GPU)</string>
+    <string name="settings_gpu_layers_desc">Split GGUF transformer layers between Vulkan GPU and ARM CPU for maximum throughput without running out of RAM.</string>
+    <string name="settings_gpu_layers_auto">Auto</string>
+    <string name="settings_gpu_layers_cpu_only">CPU Only</string>
+    <string name="settings_gpu_layers_all">All GPU</string>
+    <string name="settings_speculative_title">Speculative Decoding (MTP / Draft)</string>
+    <string name="settings_speculative_desc">Predicts multiple tokens per step via native MTP heads (Qwen3 / GLM-4) or a fast local draft GGUF model.</string>
+    <string name="settings_speculative_draft_tokens">Speculative Draft Lookahead</string>
+    <string name="settings_speculative_draft_model">Draft Model (Optional)</string>
+    <string name="settings_speculative_auto_mtp">Auto (MTP Head)</string>
 </resources>

@@ -28,14 +28,18 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Api
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Contrast
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.OpenInNew
@@ -46,6 +50,7 @@ import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -55,8 +60,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -89,6 +96,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.R
+import com.example.data.local.DownloadedModelEntity
 import com.example.data.local.StorageStats
 import com.example.data.localmodel.HardwareAcceleratorInfo
 import com.example.data.localmodel.LocalHardwareBackend
@@ -99,8 +107,10 @@ import com.example.data.preferences.AppLanguage
 import com.example.data.preferences.AppSettings
 import com.example.data.preferences.ThemeMode
 import com.example.data.preferences.VoiceLocale
+import com.example.data.updates.GitHubReleaseInfo
 import com.example.data.updates.GitHubUpdateManager
 import com.example.data.updates.UpdateCheckState
+import com.example.data.updates.UpdateDownloadState
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LiquidGlassBackdrop
 import com.example.ui.theme.LiquidGlassCard
@@ -116,7 +126,9 @@ fun SettingsScreen(
     connectionState: ConnectionUiState,
     storageStats: StorageStats,
     hardwareInfo: HardwareAcceleratorInfo,
+    downloadedModels: List<DownloadedModelEntity>,
     updateState: UpdateCheckState,
+    updateDownloadState: UpdateDownloadState,
     onNavigateBack: () -> Unit,
     onOpenModelHub: () -> Unit,
     onOpenAgentsMcp: () -> Unit,
@@ -128,6 +140,11 @@ fun SettingsScreen(
     onUpdateLocalEngine: (LocalInferenceEngine) -> Unit,
     onUpdateLocalBackend: (LocalHardwareBackend) -> Unit,
     onUpdateLocalThreads: (Int) -> Unit,
+    onUpdateLocalGpuLayers: (Int) -> Unit,
+    onUpdateEnableVulkanGpu: (Boolean) -> Unit,
+    onUpdateEnableSpeculativeDecoding: (Boolean) -> Unit,
+    onUpdateSpeculativeDraftTokens: (Int) -> Unit,
+    onUpdateSpeculativeDraftModelId: (String) -> Unit,
     onUpdateSystemPrompt: (String) -> Unit,
     onUpdateTemperature: (Float) -> Unit,
     onUpdateMaxTokens: (Int) -> Unit,
@@ -139,6 +156,8 @@ fun SettingsScreen(
     onUpdateGitHubRepo: (String) -> Unit,
     onUpdateAutoCheckUpdates: (Boolean) -> Unit,
     onCheckForUpdates: (String) -> Unit,
+    onDownloadUpdateApk: (GitHubReleaseInfo) -> Unit,
+    onCancelUpdateDownload: () -> Unit,
     onTestConnection: (ApiProvider, String, String) -> Unit,
     onClearAllHistory: () -> Unit
 ) {
@@ -457,6 +476,212 @@ fun SettingsScreen(
                             valueRange = 1f..8f,
                             onValueChange = { onUpdateLocalThreads(it.roundToInt()) }
                         )
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+
+                        // Vulkan GPU Acceleration toggle + status
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Bolt,
+                                        contentDescription = null,
+                                        tint = if (hardwareInfo.hasVulkan) studioColors.statusOnline else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.settings_vulkan_gpu_title),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Text(
+                                    text = if (hardwareInfo.hasVulkan) {
+                                        "${hardwareInfo.vulkanVersion} · ${hardwareInfo.gpuFamily}"
+                                    } else {
+                                        stringResource(R.string.settings_vulkan_unavailable)
+                                    },
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.enableVulkanGpu,
+                                onCheckedChange = onUpdateEnableVulkanGpu,
+                                enabled = hardwareInfo.hasVulkan,
+                                modifier = Modifier.testTag("settings_vulkan_switch")
+                            )
+                        }
+
+                        // CPU + GPU Layer Offloading
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Layers,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.settings_gpu_layers_title),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                val layerBadge = when {
+                                    settings.localGpuLayers < 0 -> stringResource(R.string.settings_gpu_layers_auto)
+                                    settings.localGpuLayers == 0 -> stringResource(R.string.settings_gpu_layers_cpu_only)
+                                    settings.localGpuLayers >= 64 -> stringResource(R.string.settings_gpu_layers_all)
+                                    else -> "${settings.localGpuLayers} GPU + CPU"
+                                }
+                                Text(
+                                    text = layerBadge,
+                                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Text(
+                                text = stringResource(R.string.settings_gpu_layers_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            val hybridRec = hardwareInfo.recommendedHybridLayers.coerceIn(8, 32)
+                            val layerPresets = listOf(
+                                -1 to stringResource(R.string.settings_gpu_layers_auto),
+                                0 to "CPU (0)",
+                                12 to "12L",
+                                hybridRec to "${hybridRec}L",
+                                32 to "32L",
+                                99 to stringResource(R.string.settings_gpu_layers_all)
+                            ).distinctBy { it.first }
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                layerPresets.forEach { (count, label) ->
+                                    FilterChip(
+                                        selected = settings.localGpuLayers == count,
+                                        onClick = { onUpdateLocalGpuLayers(count) },
+                                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                        modifier = Modifier.testTag("settings_gpu_layers_preset_$count")
+                                    )
+                                }
+                            }
+                            Slider(
+                                value = if (settings.localGpuLayers < 0) 64f else settings.localGpuLayers.coerceIn(0, 64).toFloat(),
+                                onValueChange = { v ->
+                                    val r = v.roundToInt()
+                                    onUpdateLocalGpuLayers(if (r >= 64) 99 else r)
+                                },
+                                valueRange = 0f..64f,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("settings_gpu_layers_slider")
+                            )
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+
+                        // Speculative Decoding (MTP + Draft GGUF)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.settings_speculative_title),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = stringResource(R.string.settings_speculative_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.enableSpeculativeDecoding,
+                                onCheckedChange = onUpdateEnableSpeculativeDecoding,
+                                modifier = Modifier.testTag("settings_speculative_switch")
+                            )
+                        }
+
+                        if (settings.enableSpeculativeDecoding) {
+                            SliderPreferenceRow(
+                                label = stringResource(R.string.settings_speculative_draft_tokens),
+                                valueText = "${settings.speculativeDraftTokens} tok",
+                                value = settings.speculativeDraftTokens.toFloat(),
+                                valueRange = 2f..8f,
+                                onValueChange = { onUpdateSpeculativeDraftTokens(it.roundToInt()) }
+                            )
+
+                            val ggufDraftCandidates = remember(downloadedModels, settings.activeLocalModelId) {
+                                downloadedModels.filter {
+                                    it.format.equals("gguf", ignoreCase = true) &&
+                                        it.id != settings.activeLocalModelId
+                                }
+                            }
+                            if (ggufDraftCandidates.isNotEmpty()) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = stringResource(R.string.settings_speculative_draft_model),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        FilterChip(
+                                            selected = settings.speculativeDraftModelId.isBlank(),
+                                            onClick = { onUpdateSpeculativeDraftModelId("") },
+                                            label = {
+                                                Text(
+                                                    stringResource(R.string.settings_speculative_auto_mtp),
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        )
+                                        ggufDraftCandidates.take(5).forEach { candidate ->
+                                            FilterChip(
+                                                selected = settings.speculativeDraftModelId == candidate.id,
+                                                onClick = { onUpdateSpeculativeDraftModelId(candidate.id) },
+                                                label = {
+                                                    Text(
+                                                        candidate.displayName,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // 3. Endpoint & Credentials Card (hidden for On-Device)
@@ -812,22 +1037,65 @@ fun SettingsScreen(
                         }
                     }
 
-                    // 6. GitHub Releases App Update System
+                    // 6. GitHub Releases App Update Center (vladikusik/LocalMind)
                     SettingsSectionCard(
                         title = stringResource(R.string.settings_section_updates),
                         icon = Icons.Rounded.SystemUpdate
                     ) {
-                        Text(
-                            text = stringResource(
-                                R.string.updates_current_version,
-                                BuildConfig.VERSION_NAME,
-                                BuildConfig.VERSION_CODE
-                            ),
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                fontFamily = JetBrainsMonoFontFamily
-                            ),
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = stringResource(
+                                    R.string.updates_current_version,
+                                    BuildConfig.VERSION_NAME,
+                                    BuildConfig.VERSION_CODE
+                                ),
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontFamily = JetBrainsMonoFontFamily
+                                ),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            if (githubRepoDraft.trim() != AppSettings.DEFAULT_GITHUB_UPDATE_REPO) {
+                                TextButton(
+                                    onClick = {
+                                        githubRepoDraft = AppSettings.DEFAULT_GITHUB_UPDATE_REPO
+                                        onUpdateGitHubRepo(AppSettings.DEFAULT_GITHUB_UPDATE_REPO)
+                                    }
+                                ) {
+                                    Text(
+                                        text = AppSettings.DEFAULT_GITHUB_UPDATE_REPO,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.VerifiedUser,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = stringResource(R.string.updates_inplace_note),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
 
                         OutlinedTextField(
                             value = githubRepoDraft,
@@ -836,7 +1104,7 @@ fun SettingsScreen(
                                 onUpdateGitHubRepo(it)
                             },
                             label = { Text(stringResource(R.string.updates_repo_label)) },
-                            placeholder = { Text(stringResource(R.string.updates_repo_placeholder)) },
+                            placeholder = { Text(AppSettings.DEFAULT_GITHUB_UPDATE_REPO) },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyMedium.copy(
                                 fontFamily = JetBrainsMonoFontFamily
@@ -872,8 +1140,10 @@ fun SettingsScreen(
 
                         Button(
                             onClick = {
-                                onUpdateGitHubRepo(githubRepoDraft)
-                                onCheckForUpdates(githubRepoDraft)
+                                val targetRepo = githubRepoDraft.trim().ifBlank { AppSettings.DEFAULT_GITHUB_UPDATE_REPO }
+                                githubRepoDraft = targetRepo
+                                onUpdateGitHubRepo(targetRepo)
+                                onCheckForUpdates(targetRepo)
                             },
                             enabled = updateState !is UpdateCheckState.Checking,
                             shape = RoundedCornerShape(14.dp),
@@ -898,6 +1168,132 @@ fun SettingsScreen(
                                 Spacer(Modifier.width(8.dp))
                                 Text(stringResource(R.string.updates_check_now))
                             }
+                        }
+
+                        // Active APK download progress card
+                        when (updateDownloadState) {
+                            is UpdateDownloadState.Downloading -> {
+                                val progress = updateDownloadState.progress
+                                val dlMb = updateDownloadState.downloadedBytes / (1024.0 * 1024.0)
+                                val totalMb = updateDownloadState.totalBytes / (1024.0 * 1024.0)
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "${stringResource(R.string.updates_downloading_title)} (${updateDownloadState.releaseTag})",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = if (totalMb > 0.1) {
+                                                    String.format(Locale.US, "%.1f / %.1f MB", dlMb, totalMb)
+                                                } else {
+                                                    String.format(Locale.US, "%.1f MB", dlMb)
+                                                },
+                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        if (progress != null) {
+                                            LinearProgressIndicator(
+                                                progress = { progress },
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(6.dp)
+                                            )
+                                        } else {
+                                            LinearProgressIndicator(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(6.dp)
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = onCancelUpdateDownload,
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(stringResource(R.string.action_cancel))
+                                        }
+                                    }
+                                }
+                            }
+
+                            is UpdateDownloadState.Completed -> {
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = studioColors.statusOnline.copy(alpha = 0.14f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.CheckCircle,
+                                                contentDescription = null,
+                                                tint = studioColors.statusOnline,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Text(
+                                                text = stringResource(R.string.updates_ready_to_install, updateDownloadState.fileName),
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = studioColors.statusOnline
+                                            )
+                                        }
+                                        Text(
+                                            text = stringResource(R.string.updates_tap_notification_hint),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Button(
+                                            onClick = { GitHubUpdateManager.openSystemDownloads(context) },
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("settings_open_downloads_button")
+                                        ) {
+                                            Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(stringResource(R.string.updates_open_downloads))
+                                        }
+                                    }
+                                }
+                            }
+
+                            is UpdateDownloadState.Failed -> {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = updateDownloadState.message,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.padding(10.dp)
+                                    )
+                                }
+                            }
+
+                            UpdateDownloadState.Idle -> Unit
                         }
 
                         when (updateState) {
@@ -936,7 +1332,7 @@ fun SettingsScreen(
                                                 text = release.changelog,
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 4,
+                                                maxLines = 6,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
@@ -944,17 +1340,9 @@ fun SettingsScreen(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
-                                            val downloadTarget = release.apkDownloadUrl ?: release.htmlUrl
                                             Button(
-                                                onClick = {
-                                                    if (GitHubUpdateManager.isTrustedGitHubUrl(downloadTarget)) {
-                                                        runCatching {
-                                                            context.startActivity(
-                                                                Intent(Intent.ACTION_VIEW, Uri.parse(downloadTarget))
-                                                            )
-                                                        }
-                                                    }
-                                                },
+                                                onClick = { onDownloadUpdateApk(release) },
+                                                enabled = updateDownloadState !is UpdateDownloadState.Downloading,
                                                 shape = RoundedCornerShape(12.dp),
                                                 modifier = Modifier
                                                     .weight(1f)
@@ -962,18 +1350,10 @@ fun SettingsScreen(
                                             ) {
                                                 Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                                                 Spacer(Modifier.width(6.dp))
-                                                Text(stringResource(R.string.updates_download_apk))
+                                                Text(stringResource(R.string.updates_download_in_app))
                                             }
                                             OutlinedButton(
-                                                onClick = {
-                                                    if (GitHubUpdateManager.isTrustedGitHubUrl(release.htmlUrl)) {
-                                                        runCatching {
-                                                            context.startActivity(
-                                                                Intent(Intent.ACTION_VIEW, Uri.parse(release.htmlUrl))
-                                                            )
-                                                        }
-                                                    }
-                                                },
+                                                onClick = { GitHubUpdateManager.openTrustedUrlInBrowser(context, release.htmlUrl) },
                                                 shape = RoundedCornerShape(12.dp)
                                             ) {
                                                 Icon(Icons.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -1016,6 +1396,65 @@ fun SettingsScreen(
                             }
 
                             else -> Unit
+                        }
+
+                        val recentReleases = when (updateState) {
+                            is UpdateCheckState.UpdateAvailable -> updateState.recentReleases
+                            is UpdateCheckState.UpToDate -> updateState.recentReleases
+                            else -> emptyList()
+                        }
+                        if (recentReleases.size > 1) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = stringResource(R.string.updates_recent_releases),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                recentReleases.take(4).forEach { rel ->
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.4f),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = rel.tagName,
+                                                    style = MaterialTheme.typography.labelLarge.copy(fontFamily = JetBrainsMonoFontFamily),
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = buildString {
+                                                        if (rel.publishedAt.isNotBlank()) append(rel.publishedAt)
+                                                        if (rel.apkSizeBytes > 0L) {
+                                                            if (isNotEmpty()) append(" · ")
+                                                            append(String.format(Locale.US, "%.1f MB", rel.apkSizeBytes / (1024.0 * 1024.0)))
+                                                        }
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            if (rel.apkDownloadUrl != null) {
+                                                FilledTonalButton(
+                                                    onClick = { onDownloadUpdateApk(rel) },
+                                                    shape = RoundedCornerShape(10.dp)
+                                                ) {
+                                                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text("APK", style = MaterialTheme.typography.labelSmall)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         Text(

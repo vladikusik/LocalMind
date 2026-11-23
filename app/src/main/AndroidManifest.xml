@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-sdk tools:overrideLibrary="com.llamatik" />
+    <uses-sdk tools:overrideLibrary="com.llamatik.core,com.llamatik" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -39,6 +39,9 @@
             android:required="false" />
         <uses-native-library
             android:name="libGLES_mali.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libvulkan.so"
             android:required="false" />
         <activity
             android:name=".MainActivity"

@@ -1,5 +1,11 @@
 package com.example.data.updates
 
+import android.app.DownloadManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import com.example.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,16 +36,55 @@ sealed interface UpdateCheckState {
     data object Checking : UpdateCheckState
     data class UpToDate(
         val currentVersion: String,
+        val currentBuild: Int,
         val latestTag: String,
-        val htmlUrl: String
+        val htmlUrl: String,
+        val recentReleases: List<GitHubReleaseInfo> = emptyList()
     ) : UpdateCheckState
 
     data class UpdateAvailable(
-        val release: GitHubReleaseInfo
+        val release: GitHubReleaseInfo,
+        val recentReleases: List<GitHubReleaseInfo> = emptyList()
     ) : UpdateCheckState
 
     data class Error(val message: String) : UpdateCheckState
 }
+
+sealed interface UpdateDownloadState {
+    data object Idle : UpdateDownloadState
+    data class Downloading(
+        val releaseTag: String,
+        val fileName: String,
+        val downloadedBytes: Long,
+        val totalBytes: Long,
+        val downloadId: Long
+    ) : UpdateDownloadState {
+        val progress: Float?
+            get() = if (totalBytes > 0L) {
+                (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+            } else {
+                null
+            }
+    }
+
+    data class Completed(
+        val releaseTag: String,
+        val fileName: String,
+        val downloadId: Long
+    ) : UpdateDownloadState
+
+    data class Failed(
+        val releaseTag: String,
+        val message: String
+    ) : UpdateDownloadState
+}
+
+data class DownloadPollSnapshot(
+    val status: Int,
+    val bytesDownloaded: Long,
+    val bytesTotal: Long,
+    val reason: Int
+)
 
 class GitHubUpdateManager {
 
@@ -49,7 +94,7 @@ class GitHubUpdateManager {
         .followRedirects(true)
         .build()
 
-    suspend fun checkLatestRelease(rawRepoInput: String): Result<GitHubReleaseInfo> =
+    suspend fun checkLatestRelease(rawRepoInput: String): Result<Pair<GitHubReleaseInfo, List<GitHubReleaseInfo>>> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val slug = normalizeRepoSlug(rawRepoInput)
@@ -57,12 +102,79 @@ class GitHubUpdateManager {
                         "Invalid GitHub repository. Use 'owner/repo' or 'https://github.com/owner/repo'."
                     )
 
-                val releaseJson = fetchLatestReleaseJson(slug)
+                val recent = fetchRecentReleasesJson(slug, limit = 6)
+                    .map { parseRelease(slug, it) }
+
+                val latestFromEndpoint = fetchLatestReleaseJson(slug)?.let { parseRelease(slug, it) }
+                val latest = latestFromEndpoint
+                    ?: recent.firstOrNull()
                     ?: throw IOException("No published GitHub Releases found in $slug yet.")
 
-                parseRelease(slug, releaseJson)
+                val mergedRecent = buildList {
+                    add(latest)
+                    recent.filterNot { it.tagName == latest.tagName }.forEach { add(it) }
+                }.take(6)
+
+                latest to mergedRecent
             }
         }
+
+    fun enqueueApkDownload(
+        context: Context,
+        release: GitHubReleaseInfo
+    ): Result<Pair<Long, String>> = runCatching {
+        val url = release.apkDownloadUrl
+            ?.takeIf { isTrustedGitHubUrl(it) }
+            ?: throw IllegalStateException("This GitHub release does not contain a direct APK asset.")
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw UnsupportedOperationException("DIRECT_BROWSER_FALLBACK")
+        }
+
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+            ?: throw IllegalStateException("Android DownloadManager unavailable.")
+
+        val rawName = release.apkAssetName?.takeIf { it.lowercase().endsWith(".apk") }
+            ?: "LocalMind-${release.tagName}.apk"
+        val safeFileName = rawName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+
+        val request = DownloadManager.Request(Uri.parse(url))
+            .setTitle("LocalMind ${release.tagName}")
+            .setDescription("In-place APK update · settings & models preserved")
+            .setMimeType("application/vnd.android.package-archive")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(true)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, safeFileName)
+
+        val downloadId = dm.enqueue(request)
+        downloadId to safeFileName
+    }
+
+    fun queryDownloadStatus(context: Context, downloadId: Long): DownloadPollSnapshot? {
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return null
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        return runCatching {
+            dm.query(query)?.use { cursor ->
+                if (!cursor.moveToFirst()) return null
+                val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                val dlIdx = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                val totalIdx = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
+                val reasonIdx = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+                DownloadPollSnapshot(
+                    status = if (statusIdx >= 0) cursor.getInt(statusIdx) else DownloadManager.STATUS_FAILED,
+                    bytesDownloaded = if (dlIdx >= 0) cursor.getLong(dlIdx).coerceAtLeast(0L) else 0L,
+                    bytesTotal = if (totalIdx >= 0) cursor.getLong(totalIdx).coerceAtLeast(0L) else 0L,
+                    reason = if (reasonIdx >= 0) cursor.getInt(reasonIdx) else 0
+                )
+            }
+        }.getOrNull()
+    }
+
+    fun cancelDownload(context: Context, downloadId: Long) {
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return
+        runCatching { dm.remove(downloadId) }
+    }
 
     private fun fetchLatestReleaseJson(slug: String): JSONObject? {
         val latestUrl = "https://api.github.com/repos/$slug/releases/latest"
@@ -74,21 +186,25 @@ class GitHubUpdateManager {
                 throw IOException(formatGitHubError(code, body))
             }
         }
+        return null
+    }
 
-        // Fallback when repository only has prereleases or workflow build releases
-        val listUrl = "https://api.github.com/repos/$slug/releases?per_page=5"
+    private fun fetchRecentReleasesJson(slug: String, limit: Int): List<JSONObject> {
+        val listUrl = "https://api.github.com/repos/$slug/releases?per_page=$limit"
         val (code, body) = executeGitHubJson(listUrl)
         if (code !in 200..299) {
+            if (code == 404) return emptyList()
             throw IOException(formatGitHubError(code, body))
         }
         val array = JSONArray(body)
-        for (i in 0 until array.length()) {
-            val item = array.optJSONObject(i) ?: continue
-            if (!item.optBoolean("draft", false)) {
-                return item
+        return buildList {
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                if (!item.optBoolean("draft", false)) {
+                    add(item)
+                }
             }
         }
-        return null
     }
 
     private fun executeGitHubJson(url: String): Pair<Int, String> {
@@ -106,7 +222,7 @@ class GitHubUpdateManager {
     }
 
     private fun parseRelease(slug: String, json: JSONObject): GitHubReleaseInfo {
-        val tagName = json.optString("tag_name").trim().ifBlank { "v1.0" }
+        val tagName = json.optString("tag_name").trim().ifBlank { "v1.1.0" }
         val releaseName = json.optString("name").trim().ifBlank { tagName }
         val changelog = json.optString("body").trim()
         val publishedAt = json.optString("published_at").trim().take(10)
@@ -118,9 +234,8 @@ class GitHubUpdateManager {
             "https://github.com/$slug/releases"
         }
 
-        var apkName: String? = null
-        var apkUrl: String? = null
-        var apkSize = 0L
+        // Prefer arm64 / LocalMind APK assets when multiple exist
+        val apkAssets = mutableListOf<Triple<String, String, Long>>()
         val assets = json.optJSONArray("assets")
         if (assets != null) {
             for (i in 0 until assets.length()) {
@@ -128,13 +243,14 @@ class GitHubUpdateManager {
                 val name = asset.optString("name").trim()
                 val dl = asset.optString("browser_download_url").trim()
                 if (name.lowercase().endsWith(".apk") && isTrustedGitHubUrl(dl)) {
-                    apkName = name
-                    apkUrl = dl
-                    apkSize = asset.optLong("size", 0L)
-                    break
+                    apkAssets += Triple(name, dl, asset.optLong("size", 0L))
                 }
             }
         }
+        val preferredApk = apkAssets.firstOrNull { (name, _, _) ->
+            val l = name.lowercase()
+            l.contains("arm64") || l.contains("localmind")
+        } ?: apkAssets.firstOrNull()
 
         val isNewer = isTagNewerThanCurrent(
             remoteTag = tagName,
@@ -150,9 +266,9 @@ class GitHubUpdateManager {
             changelog = changelog,
             publishedAt = publishedAt,
             htmlUrl = safeHtmlUrl,
-            apkAssetName = apkName,
-            apkDownloadUrl = apkUrl,
-            apkSizeBytes = apkSize,
+            apkAssetName = preferredApk?.first,
+            apkDownloadUrl = preferredApk?.second,
+            apkSizeBytes = preferredApk?.third ?: 0L,
             isNewer = isNewer
         )
     }
@@ -169,6 +285,27 @@ class GitHubUpdateManager {
     companion object {
         private val REPO_SLUG_REGEX = Regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
         private val NUMBER_TOKEN_REGEX = Regex("\\d+")
+
+        fun openSystemDownloads(context: Context): Boolean {
+            return runCatching {
+                val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                true
+            }.getOrDefault(false)
+        }
+
+        fun openTrustedUrlInBrowser(context: Context, url: String): Boolean {
+            if (!isTrustedGitHubUrl(url)) return false
+            return runCatching {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                true
+            }.getOrDefault(false)
+        }
 
         fun normalizeRepoSlug(raw: String): String? {
             var cleaned = raw.trim()

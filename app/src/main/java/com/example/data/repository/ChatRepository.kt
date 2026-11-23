@@ -307,6 +307,17 @@ class ChatRepository(
                 )
             }
 
+        val draftModelPath = if (
+            settings.activeProvider.protocol == ApiProtocol.ON_DEVICE_MEDIAPIPE &&
+            localModel != null &&
+            settings.speculativeDraftModelId.isNotBlank() &&
+            settings.speculativeDraftModelId != localModel.id
+        ) {
+            downloadedModelDao.getById(settings.speculativeDraftModelId)?.localPath
+        } else {
+            null
+        }
+
         val stepRunner: (List<ChatMessageDto>) -> Flow<StreamEvent> = { stepMessages ->
             if (settings.activeProvider.protocol == ApiProtocol.ON_DEVICE_MEDIAPIPE) {
                 if (localModel == null) {
@@ -323,7 +334,12 @@ class ChatRepository(
                         hardwareBackend = settings.localBackend,
                         threads = settings.localThreads,
                         temperature = settings.temperature,
-                        maxTokens = settings.maxTokens
+                        maxTokens = settings.maxTokens,
+                        gpuLayers = settings.localGpuLayers,
+                        enableVulkanGpu = settings.enableVulkanGpu,
+                        enableSpeculativeDecoding = settings.enableSpeculativeDecoding,
+                        speculativeDraftTokens = settings.speculativeDraftTokens,
+                        speculativeDraftModelPath = draftModelPath
                     )
                 }
             } else {
@@ -385,7 +401,11 @@ class ChatRepository(
                 hardwareBackend = settings.localBackend,
                 threads = settings.localThreads,
                 temperature = settings.temperature.coerceAtMost(0.45f),
-                maxTokens = settings.maxTokens
+                maxTokens = settings.maxTokens,
+                gpuLayers = settings.localGpuLayers,
+                enableVulkanGpu = settings.enableVulkanGpu,
+                enableSpeculativeDecoding = settings.enableSpeculativeDecoding,
+                speculativeDraftTokens = settings.speculativeDraftTokens
             )
         }
 

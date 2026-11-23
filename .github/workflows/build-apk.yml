@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -25,7 +27,7 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" "build-tools;36.0.0"
 
-      - name: Prepare debug keystore
+      - name: Prepare consistent signing keystore
         run: |
           if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
             base64 -d debug.keystore.base64 > debug.keystore
@@ -42,28 +44,53 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      - name: Compute monotonic version code & changelog
+        id: version
+        run: |
+          VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))
+          VERSION_NAME="1.1.${GITHUB_RUN_NUMBER}"
+          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Що нового у LocalMind v${VERSION_NAME} (build ${VERSION_CODE})"
+            echo ""
+            git log -n 6 --pretty=format:"- %s" || true
+            echo ""
+            echo ""
+            echo "Оновлення встановлюється поверх попередньої версії без видалення даних, чатів та завантажених моделей."
+          } > release_notes.md
+
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
 
-      - name: Assemble Debug APK
+      - name: Assemble versioned APK
+        env:
+          APP_VERSION_CODE: ${{ steps.version.outputs.code }}
+          APP_VERSION_NAME: ${{ steps.version.outputs.name }}
         run: gradle :app:assembleDebug --no-daemon
 
-      - name: Copy APK with clean filename
-        run: cp app/build/outputs/apk/debug/app-debug.apk LocalMind.apk
+      - name: Prepare release APK & checksum
+        run: |
+          APK_NAME="LocalMind-v${{ steps.version.outputs.name }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+          sha256sum "$APK_NAME" > "${APK_NAME}.sha256"
+          echo "apk_name=$APK_NAME" >> "$GITHUB_ENV"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: LocalMind-APK
-          path: LocalMind.apk
+          path: ${{ env.apk_name }}
 
-      - name: Publish direct APK download on Releases
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="v1.0.${{ github.run_number }}"
-          gh release create "$TAG" LocalMind.apk \
+          TAG="${{ steps.version.outputs.tag }}"
+          gh release create "$TAG" "${{ env.apk_name }}" "${{ env.apk_name }}.sha256" \
             --title "LocalMind $TAG" \
-            --notes "Автоматична збірка LocalMind ($TAG) для встановлення на Android без ПК. Натисніть LocalMind.apk нижче, щоб завантажити."
+            --notes-file release_notes.md \
+            --latest

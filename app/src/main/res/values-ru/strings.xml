@@ -312,7 +312,7 @@
     <string name="settings_section_updates">Обновления через GitHub</string>
     <string name="updates_current_version">Установленная версия: v%1$s (сборка %2$d)</string>
     <string name="updates_repo_label">Репозиторий GitHub (owner/repo)</string>
-    <string name="updates_repo_placeholder">username/LocalMind</string>
+    <string name="updates_repo_placeholder">vladikusik/LocalMind</string>
     <string name="updates_auto_check">Автопроверка обновлений при запуске</string>
     <string name="updates_auto_check_desc">Проверяет последний GitHub Release и наличие нового APK</string>
     <string name="updates_check_now">Проверить обновления</string>
@@ -320,7 +320,31 @@
     <string name="updates_up_to_date">У вас последняя версия (актуальная: %1$s)</string>
     <string name="updates_available_title">Доступно обновление: %1$s</string>
     <string name="updates_download_apk">Скачать APK</string>
-    <string name="updates_view_release">Открыть релиз</string>
-    <string name="updates_banner_text">Доступно обновление %1$s на GitHub</string>
-    <string name="updates_hint">Укажите ваш публичный GitHub-репозиторий, куда вы загрузили проект. Новые APK сборки из GitHub Actions будут появляться здесь автоматически.</string>
+    <string name="updates_download_in_app">Скачать обновление</string>
+    <string name="updates_view_release">Релиз на GitHub</string>
+    <string name="updates_open_browser">Браузер</string>
+    <string name="updates_banner_text">Доступно обновление %1$s — нажмите для обновления</string>
+    <string name="updates_hint">Подключено к vladikusik/LocalMind. Каждая сборка GitHub Actions автоматически увеличивает versionCode с той же подписью — Android обновляет приложение поверх без переустановки.</string>
+    <string name="updates_inplace_note">Обновление ставится поверх — все чаты, скачанные модели и настройки сохранятся без удаления приложения.</string>
+    <string name="updates_changelog_title">Что нового</string>
+    <string name="updates_downloading_title">Загрузка APK</string>
+    <string name="updates_ready_to_install">Скачано: %1$s</string>
+    <string name="updates_tap_notification_hint">Нажмите на уведомление о загрузке или откройте «Загрузки» и тапните по APK, чтобы обновить поверх.</string>
+    <string name="updates_open_downloads">Открыть «Загрузки» и обновить</string>
+    <string name="updates_skip_version">Пропустить эту версию</string>
+    <string name="updates_recent_releases">Последние релизы</string>
+
+    <!-- Vulkan GPU, CPU+GPU Layer Offloading & Speculative Decoding -->
+    <string name="settings_vulkan_gpu_title">Ускорение Vulkan GPU</string>
+    <string name="settings_vulkan_unavailable">Аппаратный Vulkan Compute недоступен на этом устройстве</string>
+    <string name="settings_gpu_layers_title">Распределение слоёв (CPU + GPU)</string>
+    <string name="settings_gpu_layers_desc">Выносит слои GGUF-модели на Vulkan GPU, а остальные оставляет на CPU — максимум скорости без переполнения памяти.</string>
+    <string name="settings_gpu_layers_auto">Авто</string>
+    <string name="settings_gpu_layers_cpu_only">Только CPU</string>
+    <string name="settings_gpu_layers_all">Все на GPU</string>
+    <string name="settings_speculative_title">Speculative Decoding (MTP / Draft)</string>
+    <string name="settings_speculative_desc">Генерирует несколько токенов за шаг через встроенные MTP-головы (Qwen3 / GLM-4) или лёгкую черновую GGUF-модель.</string>
+    <string name="settings_speculative_draft_tokens">Количество токенов наперёд</string>
+    <string name="settings_speculative_draft_model">Черновая модель (Draft GGUF)</string>
+    <string name="settings_speculative_auto_mtp">Авто (MTP-голова)</string>
 </resources>
