@@ -217,15 +217,15 @@ private fun LocalMindApp(
                         viewModel.searchHuggingFacePreset("diffusion")
                         currentDestination = AppDestination.MODEL_HUB
                     },
-                    onOpenLocalDreamHub = {
-                        viewModel.searchHuggingFacePreset("localdream")
+                    onSearchModelPreset = { query ->
+                        viewModel.searchHuggingFaceQuery(query)
                         currentDestination = AppDestination.MODEL_HUB
                     },
                     onImportCheckpointUri = viewModel::importLocalModelFile,
                     onSelectMode = viewModel::updateImageGenMode,
+                    onSelectPipeline = viewModel::selectDiffusionPipeline,
                     onSelectBackend = viewModel::updateLocalBackend,
                     onSelectLocalCheckpoint = viewModel::selectActiveImageModel,
-                    onUpdateLocalDreamUrl = viewModel::updateLocalDreamUrl,
                     onUpdateServerUrl = viewModel::updateImageServerUrl,
                     onUpdateServerModel = viewModel::updateImageServerModel,
                     onProbeServer = viewModel::probeImageServer,
@@ -235,12 +235,32 @@ private fun LocalMindApp(
                     onPickReferencePhoto = viewModel::importImg2ImgReference,
                     onClearReferencePhoto = viewModel::clearImg2ImgReference,
                     onUpdateStrength = viewModel::updateImg2ImgStrength,
+                    onAddMaskStroke = viewModel::addInpaintMaskStroke,
+                    onUndoMaskStroke = viewModel::undoInpaintMaskStroke,
+                    onClearMask = viewModel::clearInpaintMask,
+                    onToggleInvertMask = viewModel::toggleInpaintInvertMask,
+                    onUpdateMaskFeather = viewModel::updateInpaintFeather,
+                    onUpdateUpscaleMethod = viewModel::updateUpscaleMethod,
+                    onUpdateUpscaleDenoise = viewModel::updateUpscaleDenoise,
                     onUpdateSize = viewModel::updateImageSize,
+                    onUpdateScheduler = viewModel::updateImageScheduler,
                     onUpdateSteps = viewModel::updateImageSteps,
                     onUpdateCfgScale = viewModel::updateImageCfgScale,
+                    onUpdateClipSkip = viewModel::updateImageClipSkip,
+                    onUpdateBatchCount = viewModel::updateImageBatchCount,
+                    onUpdateHiResFix = viewModel::updateImageHiResFix,
                     onUpdateSeed = viewModel::updateImageSeed,
+                    onToggleSeedLock = viewModel::toggleImageSeedLocked,
                     onGenerate = viewModel::generateLocalImage,
                     onStopGenerate = viewModel::stopImageGeneration,
+                    onQuickUpscaleImage = { image ->
+                        viewModel.upscaleImageNow(
+                            sourcePathOverride = image.localPath,
+                            methodOverride = com.example.data.imagegen.UpscaleMethod.SMART_SHARP_2X
+                        )
+                    },
+                    onSendToImg2Img = viewModel::sendGeneratedImageToImg2Img,
+                    onSendToInpaint = viewModel::sendGeneratedImageToInpaint,
                     onSaveToGallery = viewModel::saveGeneratedImageToGallery,
                     onSendToChat = { image ->
                         viewModel.attachGeneratedImageToChat(image)

@@ -17,7 +17,7 @@ enum class LocalInferenceEngine(
     ),
     LITERT_LM(
         id = "litert_lm",
-        displayName = "LiteRT-LM (.litertlm)",
+        displayName = "LiteRT-LM (QNN NPU)",
         supportedFormats = setOf("litertlm", "task")
     ),
     MEDIAPIPE_GENAI(
@@ -32,7 +32,8 @@ enum class LocalInferenceEngine(
 
         fun resolveForFormat(
             preferred: LocalInferenceEngine,
-            format: String
+            format: String,
+            hardwareBackend: LocalHardwareBackend = LocalHardwareBackend.NPU
         ): LocalInferenceEngine {
             val ext = format.lowercase()
             if (preferred != AUTO && ext in preferred.supportedFormats) {
@@ -41,7 +42,9 @@ enum class LocalInferenceEngine(
             return when (ext) {
                 "gguf" -> LLAMA_CPP
                 "litertlm" -> LITERT_LM
-                "task", "bin" -> MEDIAPIPE_GENAI
+                // When NPU is selected, route .task models through LiteRT-LM so Qualcomm QNN HTP NPU is used
+                "task" -> if (hardwareBackend == LocalHardwareBackend.NPU) LITERT_LM else MEDIAPIPE_GENAI
+                "bin" -> MEDIAPIPE_GENAI
                 else -> LLAMA_CPP
             }
         }
@@ -55,6 +58,6 @@ enum class LocalHardwareBackend(val id: String) {
 
     companion object {
         fun fromId(id: String?): LocalHardwareBackend =
-            entries.firstOrNull { it.id == id } ?: CPU
+            entries.firstOrNull { it.id == id } ?: NPU
     }
 }

@@ -39,22 +39,17 @@ enum class ImageGenBackendMode(
 ) {
     ON_DEVICE_SD_CPP(
         id = "on_device_sd",
-        displayName = "On-Device (sd.cpp)",
+        displayName = "On-Device Studio",
         defaultUrl = ""
-    ),
-    LOCAL_DREAM_NPU(
-        id = "local_dream",
-        displayName = "Local Dream (NPU/MNN)",
-        defaultUrl = LocalDreamCatalog.DEFAULT_SERVER_URL
     ),
     LOCAL_A1111_FORGE(
         id = "local_a1111",
-        displayName = "A1111 / Forge / WebUI",
+        displayName = "PC WebUI (A1111/Forge)",
         defaultUrl = "http://10.0.2.2:7860"
     ),
     LOCAL_OPENAI_IMAGES(
         id = "local_openai",
-        displayName = "Local OpenAI Images API",
+        displayName = "Local OpenAI API",
         defaultUrl = "http://10.0.2.2:1234/v1"
     );
 
@@ -66,6 +61,7 @@ enum class ImageGenBackendMode(
 
 data class ImageGenRequest(
     val mode: ImageGenBackendMode,
+    val pipelineMode: DiffusionPipelineMode = DiffusionPipelineMode.TXT2IMG,
     val prompt: String,
     val negativePrompt: String,
     val width: Int,
@@ -73,6 +69,10 @@ data class ImageGenRequest(
     val steps: Int,
     val cfgScale: Float,
     val seed: Long,
+    val scheduler: DiffusionScheduler = DiffusionScheduler.DPM_PP_2M_KARRAS,
+    val clipSkip: Int = 1,
+    val hiResFix: Boolean = false,
+    val hiResStrength: Float = 0.38f,
     val localModelPath: String?,
     val localModelName: String,
     val serverUrl: String,
@@ -81,7 +81,25 @@ data class ImageGenRequest(
     val hardwareBackend: LocalHardwareBackend,
     val threads: Int,
     val initImagePath: String? = null,
-    val img2imgStrength: Float = 0.65f
+    val img2imgStrength: Float = 0.65f,
+    val maskStrokes: List<MaskStroke> = emptyList(),
+    val invertMask: Boolean = false,
+    val maskFeatherPx: Int = 6
+)
+
+data class ImageUpscaleRequest(
+    val sourceImagePath: String,
+    val method: UpscaleMethod,
+    val prompt: String,
+    val negativePrompt: String,
+    val denoiseStrength: Float,
+    val steps: Int,
+    val cfgScale: Float,
+    val seed: Long,
+    val localModelPath: String?,
+    val localModelName: String,
+    val hardwareBackend: LocalHardwareBackend,
+    val threads: Int
 )
 
 data class ImageGenResult(
@@ -95,11 +113,18 @@ data class ImageGenResult(
 )
 
 data class ImageStudioUiState(
+    val pipelineMode: DiffusionPipelineMode = DiffusionPipelineMode.TXT2IMG,
     val prompt: String = "",
-    val negativePrompt: String = "lowres, blurry, bad anatomy, watermark, text, deformed, ugly, jpeg artifacts",
+    val negativePrompt: String = LocalDreamCatalog.negativePresets.first().prompt,
     val seedInput: String = "",
+    val seedLocked: Boolean = false,
     val initImagePath: String? = null,
     val img2imgStrength: Float = 0.65f,
+    val maskStrokes: List<MaskStroke> = emptyList(),
+    val invertMask: Boolean = false,
+    val maskFeatherPx: Int = 6,
+    val upscaleMethod: UpscaleMethod = UpscaleMethod.SMART_SHARP_2X,
+    val upscaleDenoise: Float = 0.35f,
     val isGenerating: Boolean = false,
     val isEnhancingPrompt: Boolean = false,
     val progressLabel: String? = null,
@@ -141,6 +166,9 @@ class LocalImageGenerator(private val context: Context) {
     private val refImageDir: File
         get() = File(context.cacheDir, "img2img_refs").apply { if (!exists()) mkdirs() }
 
+    private val unpackedSdDir: File
+        get() = File(context.filesDir, "sd_models").apply { if (!exists()) mkdirs() }
+
     suspend fun generate(
         request: ImageGenRequest,
         onStatus: (String) -> Unit = {}
@@ -161,11 +189,6 @@ class LocalImageGenerator(private val context: Context) {
                     onStatus = onStatus
                 )
 
-                ImageGenBackendMode.LOCAL_DREAM_NPU -> generateViaLocalDream(
-                    request = request.copy(prompt = cleanPrompt, seed = effectiveSeed),
-                    onStatus = onStatus
-                )
-
                 ImageGenBackendMode.LOCAL_A1111_FORGE -> generateViaA1111(
                     request = request.copy(prompt = cleanPrompt, seed = effectiveSeed),
                     onStatus = onStatus
@@ -179,19 +202,115 @@ class LocalImageGenerator(private val context: Context) {
         }
     }
 
+    /**
+     * Built-in On-Device Upscaler (2x/4x Instant Detail Sharp or 2x HiRes Diffusion Fix).
+     * Mirrors Local Dream's Upscaler / UltraFix directly inside LocalMind.
+     */
+    suspend fun upscaleImage(
+        request: ImageUpscaleRequest,
+        onStatus: (String) -> Unit = {}
+    ): Result<ImageGenResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val srcFile = File(request.sourceImagePath)
+            if (!srcFile.exists()) {
+                throw IOException("Select or generate an image to upscale first.")
+            }
+
+            val startMs = System.currentTimeMillis()
+            val effectiveSeed = if (request.seed >= 0L) {
+                request.seed
+            } else {
+                Random.nextLong(1L, 2_147_483_647L)
+            }
+
+            if (!request.method.usesDiffusion) {
+                onStatus("Upscaling ${request.method.scaleFactor}× on-device (progressive sharp enhance)…")
+                val upscaled = InpaintMaskProcessor.upscaleBitmapSharp(
+                    sourcePath = srcFile.absolutePath,
+                    scaleFactor = request.method.scaleFactor,
+                    sharpenStrength = if (request.method.scaleFactor >= 4) 0.68f else 0.52f
+                )
+                val w = upscaled.width
+                val h = upscaled.height
+                val outFile = writePngFile(upscaled)
+                upscaled.recycle()
+                return@runCatching ImageGenResult(
+                    file = outFile,
+                    width = w,
+                    height = h,
+                    seed = effectiveSeed,
+                    durationMs = System.currentTimeMillis() - startMs,
+                    engineLabel = "On-Device Upscaler ${request.method.scaleFactor}×",
+                    modelName = "Detail Sharp ${request.method.scaleFactor}×"
+                )
+            }
+
+            // HiRes Diffusion 2x Refinement Pass (on-device stable-diffusion.cpp)
+            val resolvedModel = resolveRunnableCheckpoint(request.localModelPath, onStatus)
+            val threads = request.threads.coerceIn(1, 8)
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(srcFile.absolutePath, opts)
+            val baseW = opts.outWidth.takeIf { it > 0 } ?: 512
+            val baseH = opts.outHeight.takeIf { it > 0 } ?: 512
+            val targetW = alignTo64((baseW * 2).coerceIn(512, 1024))
+            val targetH = alignTo64((baseH * 2).coerceIn(512, 1024))
+            val steps = request.steps.coerceIn(4, 30)
+            val cfg = request.cfgScale.coerceIn(1.0f, 15.0f)
+            val denoise = request.denoiseStrength.coerceIn(0.15f, 0.70f)
+
+            onStatus("Pre-upscaling image to $targetW×$targetH…")
+            val preUpscaled = InpaintMaskProcessor.upscaleBitmapSharp(
+                sourcePath = srcFile.absolutePath,
+                scaleFactor = 2,
+                sharpenStrength = 0.30f
+            )
+            val resizedForSd = if (preUpscaled.width != targetW || preUpscaled.height != targetH) {
+                Bitmap.createScaledBitmap(preUpscaled, targetW, targetH, true).also { preUpscaled.recycle() }
+            } else {
+                preUpscaled
+            }
+            val initRgba = bitmapToRgba(resizedForSd)
+            resizedForSd.recycle()
+
+            val rgbaBytes = synchronized(lock) {
+                ensureSdModelLoaded(resolvedModel, threads, onStatus)
+                onStatus("Running HiRes Diffusion 2× pass ($targetW×$targetH · $steps steps)…")
+                StableDiffusionBridge.img2img(
+                    initImageRgba = initRgba,
+                    initImageW = targetW,
+                    initImageH = targetH,
+                    prompt = request.prompt.ifBlank { "masterpiece, ultra sharp, intricate detail, high resolution" },
+                    negativePrompt = request.negativePrompt.ifBlank { null },
+                    width = targetW,
+                    height = targetH,
+                    steps = steps,
+                    cfgScale = cfg,
+                    strength = denoise,
+                    seed = effectiveSeed
+                )
+            }
+
+            val finalBitmap = rgbaToBitmap(rgbaBytes, targetW, targetH)
+            val outFile = writePngFile(finalBitmap)
+            finalBitmap.recycle()
+
+            ImageGenResult(
+                file = outFile,
+                width = targetW,
+                height = targetH,
+                seed = effectiveSeed,
+                durationMs = System.currentTimeMillis() - startMs,
+                engineLabel = "HiRes Fix 2× (${request.hardwareBackend.id.uppercase()} · ${threads}T)",
+                modelName = request.localModelName.ifBlank { resolvedModel.nameWithoutExtension }
+            )
+        }
+    }
+
     private fun generateOnDeviceSdCpp(
         request: ImageGenRequest,
         onStatus: (String) -> Unit
     ): ImageGenResult {
-        val modelPath = request.localModelPath?.takeIf { it.isNotBlank() }
-            ?: throw IOException(
-                "No local diffusion model selected. Download a Stable Diffusion / Flux (.safetensors, .ckpt, or .gguf) model from Hugging Face Hub or import one from your phone."
-            )
-        val modelFile = File(modelPath)
-        if (!modelFile.exists()) {
-            throw IOException("Diffusion model file not found on disk: ${modelFile.name}")
-        }
-
+        val modelFile = resolveRunnableCheckpoint(request.localModelPath, onStatus)
         val startMs = System.currentTimeMillis()
         val threads = request.threads.coerceIn(1, 8)
         val width = alignTo64(request.width.coerceIn(256, 1024))
@@ -199,230 +318,227 @@ class LocalImageGenerator(private val context: Context) {
         val steps = request.steps.coerceIn(1, 50)
         val cfg = request.cfgScale.coerceIn(1.0f, 15.0f)
 
-        val rgbaBytes = synchronized(lock) {
-            if (loadedSdModelPath != modelFile.absolutePath || loadedSdThreads != threads) {
-                onStatus("Loading ${modelFile.name} into stable-diffusion.cpp…")
-                if (loadedSdModelPath != null) {
-                    runCatching { StableDiffusionBridge.release() }
-                    loadedSdModelPath = null
+        val initPath = request.initImagePath?.takeIf { File(it).exists() }
+        val isInpaint = request.pipelineMode == DiffusionPipelineMode.INPAINT && initPath != null
+        val isImg2Img = request.pipelineMode == DiffusionPipelineMode.IMG2IMG && initPath != null
+
+        var inpaintMaskBitmap: Bitmap? = null
+
+        val baseBitmap = try {
+            val rgbaBytes = synchronized(lock) {
+                ensureSdModelLoaded(modelFile, threads, onStatus)
+
+                when {
+                    isInpaint -> {
+                        if (request.maskStrokes.isEmpty() && !request.invertMask) {
+                            throw IOException("Paint the area you want to edit on the mask canvas first.")
+                        }
+                        onStatus("Building inpaint mask & running diffusion ($width×$height · $steps steps)…")
+                        val maskBmp = InpaintMaskProcessor.renderMaskBitmap(
+                            strokes = request.maskStrokes,
+                            width = width,
+                            height = height,
+                            invert = request.invertMask
+                        )
+                        inpaintMaskBitmap = maskBmp
+                        val seededInit = InpaintMaskProcessor.prepareInpaintInitBitmap(
+                            sourcePath = initPath,
+                            maskBitmap = maskBmp,
+                            width = width,
+                            height = height,
+                            seed = request.seed
+                        )
+                        val initRgba = bitmapToRgba(seededInit)
+                        seededInit.recycle()
+                        StableDiffusionBridge.img2img(
+                            initImageRgba = initRgba,
+                            initImageW = width,
+                            initImageH = height,
+                            prompt = request.prompt,
+                            negativePrompt = request.negativePrompt.ifBlank { null },
+                            width = width,
+                            height = height,
+                            steps = steps,
+                            cfgScale = cfg,
+                            strength = request.img2imgStrength.coerceIn(0.25f, 0.99f),
+                            seed = request.seed
+                        )
+                    }
+
+                    isImg2Img -> {
+                        onStatus("Running on-device img2img ($width×$height · $steps steps)…")
+                        val (initRgba, initW, initH) = loadRgbaBytes(initPath, width, height)
+                        StableDiffusionBridge.img2img(
+                            initImageRgba = initRgba,
+                            initImageW = initW,
+                            initImageH = initH,
+                            prompt = request.prompt,
+                            negativePrompt = request.negativePrompt.ifBlank { null },
+                            width = width,
+                            height = height,
+                            steps = steps,
+                            cfgScale = cfg,
+                            strength = request.img2imgStrength.coerceIn(0.05f, 0.99f),
+                            seed = request.seed
+                        )
+                    }
+
+                    else -> {
+                        onStatus("Generating $width×$height on-device ($steps steps · ${request.scheduler.displayName})…")
+                        StableDiffusionBridge.txt2img(
+                            prompt = request.prompt,
+                            negativePrompt = request.negativePrompt.ifBlank { null },
+                            width = width,
+                            height = height,
+                            steps = steps,
+                            cfgScale = cfg,
+                            seed = request.seed
+                        )
+                    }
                 }
-                val ok = StableDiffusionBridge.initModel(
-                    modelPath = modelFile.absolutePath,
-                    threads = threads
-                )
-                if (!ok) {
-                    throw IOException(
-                        "stable-diffusion.cpp failed to load '${modelFile.name}'. Verify the checkpoint format (.safetensors / .ckpt / SD .gguf) and available RAM."
-                    )
-                }
-                loadedSdModelPath = modelFile.absolutePath
-                loadedSdThreads = threads
             }
 
-            val initPath = request.initImagePath?.takeIf { File(it).exists() }
-            if (initPath != null) {
-                onStatus("Running local img2img ($width×$height · $steps steps)…")
-                val (initRgba, initW, initH) = loadRgbaBytes(initPath, width, height)
-                StableDiffusionBridge.img2img(
-                    initImageRgba = initRgba,
-                    initImageW = initW,
-                    initImageH = initH,
-                    prompt = request.prompt,
-                    negativePrompt = request.negativePrompt.ifBlank { null },
-                    width = width,
-                    height = height,
-                    steps = steps,
-                    cfgScale = cfg,
-                    strength = request.img2imgStrength.coerceIn(0.05f, 0.99f),
-                    seed = request.seed
+            val diffused = rgbaToBitmap(rgbaBytes, width, height)
+            if (isInpaint && inpaintMaskBitmap != null && initPath != null) {
+                onStatus("Compositing feathered inpaint mask…")
+                val blended = InpaintMaskProcessor.compositeInpaintResult(
+                    originalPath = initPath,
+                    diffusedBitmap = diffused,
+                    maskBitmap = inpaintMaskBitmap!!,
+                    featherRadiusPx = request.maskFeatherPx
                 )
+                diffused.recycle()
+                blended
             } else {
-                onStatus("Generating $width×$height locally ($steps steps · uncensored)…")
-                StableDiffusionBridge.txt2img(
+                diffused
+            }
+        } finally {
+            inpaintMaskBitmap?.recycle()
+        }
+
+        // Optional Local Dream-style HiRes Fix 2x second pass
+        val finalBitmap = if (request.hiResFix && !isInpaint && maxOf(width, height) <= 512) {
+            val hiW = alignTo64((width * 2).coerceAtMost(1024))
+            val hiH = alignTo64((height * 2).coerceAtMost(1024))
+            val hiSteps = (steps / 2).coerceIn(6, 16)
+            onStatus("Running HiRes Fix 2× ($hiW×$hiH · $hiSteps steps)…")
+            val scaled = Bitmap.createScaledBitmap(baseBitmap, hiW, hiH, true)
+            baseBitmap.recycle()
+            val hiRgba = bitmapToRgba(scaled)
+            scaled.recycle()
+
+            val refinedBytes = synchronized(lock) {
+                ensureSdModelLoaded(modelFile, threads, onStatus)
+                StableDiffusionBridge.img2img(
+                    initImageRgba = hiRgba,
+                    initImageW = hiW,
+                    initImageH = hiH,
                     prompt = request.prompt,
                     negativePrompt = request.negativePrompt.ifBlank { null },
-                    width = width,
-                    height = height,
-                    steps = steps,
+                    width = hiW,
+                    height = hiH,
+                    steps = hiSteps,
                     cfgScale = cfg,
-                    seed = request.seed
+                    strength = request.hiResStrength.coerceIn(0.20f, 0.55f),
+                    seed = request.seed + 1L
                 )
             }
+            rgbaToBitmap(refinedBytes, hiW, hiH)
+        } else {
+            baseBitmap
         }
 
-        val expectedSize = width * height * 4
-        if (rgbaBytes.size < expectedSize) {
-            throw IOException("stable-diffusion.cpp returned incomplete image buffer (${rgbaBytes.size} bytes).")
+        val finalW = finalBitmap.width
+        val finalH = finalBitmap.height
+        val outFile = writePngFile(finalBitmap)
+        finalBitmap.recycle()
+
+        val pipelineTag = when {
+            isInpaint -> "Inpaint"
+            isImg2Img -> "Img2Img"
+            request.hiResFix -> "HiRes"
+            else -> "Txt2Img"
         }
 
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgbaBytes, 0, expectedSize))
-
-        val outFile = writePngFile(bitmap)
-        bitmap.recycle()
-
-        val durationMs = System.currentTimeMillis() - startMs
         return ImageGenResult(
             file = outFile,
-            width = width,
-            height = height,
+            width = finalW,
+            height = finalH,
             seed = request.seed,
-            durationMs = durationMs,
-            engineLabel = "sd.cpp (${request.hardwareBackend.id.uppercase()} · ${threads}T)",
+            durationMs = System.currentTimeMillis() - startMs,
+            engineLabel = "On-Device $pipelineTag · ${request.scheduler.displayName} (${request.hardwareBackend.id.uppercase()})",
             modelName = request.localModelName.ifBlank { modelFile.nameWithoutExtension }
         )
     }
 
-    /**
-     * Real integration with xororz/local-dream C++ NPU/MNN local API server (default http://127.0.0.1:8081).
-     * Streams SSE progress events from POST /generate and decodes final Base64 output.
-     */
-    private fun generateViaLocalDream(
-        request: ImageGenRequest,
+    private fun resolveRunnableCheckpoint(
+        localModelPath: String?,
         onStatus: (String) -> Unit
-    ): ImageGenResult {
-        val baseUrl = request.serverUrl.trim().trimEnd('/').ifBlank { LocalDreamCatalog.DEFAULT_SERVER_URL }
-        require(baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) {
-            "Enter a valid Local Dream server URL (default http://127.0.0.1:8081)."
+    ): File {
+        val modelPath = localModelPath?.takeIf { it.isNotBlank() }
+            ?: throw IOException(
+                "No local diffusion model selected. Download a ready-to-run model (SD Turbo, DreamShaper 8, SD 1.5) in the Model Manager below or import a .safetensors / .ckpt / .gguf file."
+            )
+        val rawFile = File(modelPath)
+        if (!rawFile.exists()) {
+            throw IOException("Diffusion model file not found on disk: ${rawFile.name}")
         }
 
-        val startMs = System.currentTimeMillis()
-        val width = alignTo64(request.width.coerceIn(256, 1024))
-        val height = alignTo64(request.height.coerceIn(256, 1024))
-        val steps = request.steps.coerceIn(1, 50)
-        val initPath = request.initImagePath?.takeIf { File(it).exists() }
+        val ext = rawFile.extension.lowercase()
+        if (ext == "zip") {
+            val targetDir = File(unpackedSdDir, rawFile.nameWithoutExtension.replace(Regex("[^A-Za-z0-9._-]"), "_"))
+            val existingWeight = findNativeWeightInDir(targetDir)
+            if (existingWeight != null) return existingWeight
 
-        onStatus("Connecting to Local Dream (${request.hardwareBackend.id.uppercase()}) at $baseUrl…")
-
-        val payload = JSONObject().apply {
-            put("prompt", request.prompt)
-            put("negative_prompt", request.negativePrompt)
-            put("width", width)
-            put("height", height)
-            put("steps", steps)
-            put("cfg", request.cfgScale.toDouble())
-            put("seed", request.seed)
-            put("use_opencl", request.hardwareBackend == LocalHardwareBackend.GPU)
-            put("show_diffusion_process", false)
-            if (request.serverModel.isNotBlank()) {
-                put("model", request.serverModel)
+            onStatus("Unpacking ${rawFile.name} into local sd_models/…")
+            val extracted = InpaintMaskProcessor.extractModelZipSafely(rawFile, targetDir)
+            val weight = extracted.firstOrNull {
+                it.extension.lowercase() in setOf("safetensors", "ckpt", "gguf")
             }
-            if (initPath != null) {
-                put("image", encodeImageFileBase64(initPath))
-                put("denoise_strength", request.img2imgStrength.coerceIn(0.05f, 0.99f).toDouble())
-                put("strength", request.img2imgStrength.coerceIn(0.05f, 0.99f).toDouble())
-            }
+            if (weight != null) return weight
+            throw IOException(
+                "Archive '${rawFile.name}' contains QNN/MNN split binaries rather than a unified .safetensors/.ckpt/.gguf checkpoint. Download a unified Stable Diffusion .safetensors or .gguf model from the Model Manager below to run 100% natively inside LocalMind."
+            )
         }
 
-        val httpReq = Request.Builder()
-            .url("$baseUrl/generate")
-            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .header("Accept", "text/event-stream")
-            .build()
-
-        var finalBase64: String? = null
-        var reportedSeed = request.seed
-        var reportedWidth = width
-        var reportedHeight = height
-
-        httpClient.newCall(httpReq).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                val errBody = resp.body?.string().orEmpty().take(240)
-                throw IOException(
-                    "Local Dream HTTP ${resp.code}: ${errBody.ifBlank { resp.message }}. Make sure Local Dream backend is running on $baseUrl."
-                )
-            }
-
-            val contentType = resp.header("Content-Type").orEmpty().lowercase()
-            val body = resp.body ?: throw IOException("Local Dream returned an empty stream.")
-
-            if (contentType.contains("application/json") && !contentType.contains("text/event-stream")) {
-                val json = JSONObject(body.string())
-                if (json.optString("type") == "error" || json.has("error")) {
-                    throw IOException(json.optString("message").ifBlank { json.optString("error", "Local Dream error") })
-                }
-                finalBase64 = json.optString("image").ifBlank { json.optString("b64_json") }
-                reportedSeed = json.optLong("seed", request.seed)
-                reportedWidth = json.optInt("width", width)
-                reportedHeight = json.optInt("height", height)
-            } else {
-                val reader = body.charStream().buffered()
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    val trimmed = line.trim()
-                    if (trimmed.isEmpty() || !trimmed.startsWith("data:")) continue
-                    val dataJson = trimmed.removePrefix("data:").trim()
-                    if (dataJson.isEmpty() || dataJson == "[DONE]") continue
-
-                    val obj = runCatching { JSONObject(dataJson) }.getOrNull() ?: continue
-                    when (obj.optString("type").lowercase()) {
-                        "progress" -> {
-                            val step = obj.optInt("step", 0)
-                            val total = obj.optInt("total_steps", steps)
-                            onStatus("Local Dream (${request.hardwareBackend.id.uppercase()}) · Step $step/$total")
-                        }
-
-                        "complete", "done", "result" -> {
-                            val img = obj.optString("image").ifBlank { obj.optString("b64_json") }
-                            if (img.isNotBlank()) {
-                                finalBase64 = img
-                            }
-                            reportedSeed = obj.optLong("seed", request.seed)
-                            reportedWidth = obj.optInt("width", width)
-                            reportedHeight = obj.optInt("height", height)
-                        }
-
-                        "error" -> {
-                            throw IOException(obj.optString("message").ifBlank { "Local Dream generation failed." })
-                        }
-
-                        else -> {
-                            val fallbackImg = obj.optString("image")
-                            if (fallbackImg.isNotBlank()) {
-                                finalBase64 = fallbackImg
-                            }
-                        }
-                    }
-                }
-            }
+        if (ext in setOf("mnn", "dlc", "bin", "qnn")) {
+            throw IOException(
+                "The file '${rawFile.name}' is a Qualcomm QNN/MNN split weight that requires proprietary external QNN binaries. Select or download a unified .safetensors, .ckpt, or SD .gguf model (e.g. SD Turbo, DreamShaper 8, ChilloutMix) to run completely natively inside LocalMind."
+            )
         }
 
-        val cleanB64 = finalBase64?.substringAfter(",", finalBase64.orEmpty())?.trim().orEmpty()
-        if (cleanB64.isBlank()) {
-            throw IOException("Local Dream stream finished without returning image data.")
-        }
-
-        val imageBytes = Base64.decode(cleanB64, Base64.DEFAULT)
-        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-            ?: throw IOException("Failed to decode image returned by Local Dream.")
-        val actualW = bitmap.width.takeIf { it > 0 } ?: reportedWidth
-        val actualH = bitmap.height.takeIf { it > 0 } ?: reportedHeight
-        val outFile = writePngFile(bitmap)
-        bitmap.recycle()
-
-        return ImageGenResult(
-            file = outFile,
-            width = actualW,
-            height = actualH,
-            seed = reportedSeed,
-            durationMs = System.currentTimeMillis() - startMs,
-            engineLabel = "Local Dream (${request.hardwareBackend.id.uppercase()})",
-            modelName = request.localModelName.ifBlank {
-                request.serverModel.ifBlank { "Local Dream QNN/MNN" }
-            }
-        )
+        return rawFile
     }
 
-    suspend fun stopLocalDreamServer(serverUrl: String) = withContext(Dispatchers.IO) {
-        val base = serverUrl.trim().trimEnd('/').ifBlank { LocalDreamCatalog.DEFAULT_SERVER_URL }
-        if (!base.startsWith("http://") && !base.startsWith("https://")) return@withContext
-        runCatching {
-            val req = Request.Builder()
-                .url("$base/stop")
-                .post("{}".toRequestBody("application/json; charset=utf-8".toMediaType()))
-                .build()
-            httpClient.newCall(req).execute().close()
+    private fun findNativeWeightInDir(dir: File): File? {
+        if (!dir.exists() || !dir.isDirectory) return null
+        return dir.walkTopDown().firstOrNull { file ->
+            file.isFile && file.extension.lowercase() in setOf("safetensors", "ckpt", "gguf")
         }
+    }
+
+    private fun ensureSdModelLoaded(
+        modelFile: File,
+        threads: Int,
+        onStatus: (String) -> Unit
+    ) {
+        if (loadedSdModelPath == modelFile.absolutePath && loadedSdThreads == threads) return
+        onStatus("Loading ${modelFile.name} into native diffusion engine…")
+        if (loadedSdModelPath != null) {
+            runCatching { StableDiffusionBridge.release() }
+            loadedSdModelPath = null
+        }
+        val ok = StableDiffusionBridge.initModel(
+            modelPath = modelFile.absolutePath,
+            threads = threads
+        )
+        if (!ok) {
+            throw IOException(
+                "Native engine failed to load '${modelFile.name}'. Verify it is a valid Stable Diffusion / Flux checkpoint (.safetensors / .ckpt / .gguf) and that enough RAM is free."
+            )
+        }
+        loadedSdModelPath = modelFile.absolutePath
+        loadedSdThreads = threads
     }
 
     private fun generateViaA1111(
@@ -436,10 +552,11 @@ class LocalImageGenerator(private val context: Context) {
 
         val startMs = System.currentTimeMillis()
         val initPath = request.initImagePath?.takeIf { File(it).exists() }
-        val isImg2Img = initPath != null
+        val isImg2Img = initPath != null &&
+            (request.pipelineMode == DiffusionPipelineMode.IMG2IMG || request.pipelineMode == DiffusionPipelineMode.INPAINT)
         val endpoint = if (isImg2Img) "$baseUrl/sdapi/v1/img2img" else "$baseUrl/sdapi/v1/txt2img"
 
-        onStatus(if (isImg2Img) "Sending img2img to local WebUI…" else "Generating on local WebUI (${request.steps} steps)…")
+        onStatus(if (isImg2Img) "Sending img2img to PC WebUI…" else "Generating on PC WebUI (${request.steps} steps)…")
 
         val payload = JSONObject().apply {
             put("prompt", request.prompt)
@@ -449,14 +566,29 @@ class LocalImageGenerator(private val context: Context) {
             put("steps", request.steps.coerceIn(1, 60))
             put("cfg_scale", request.cfgScale.toDouble())
             put("seed", request.seed)
+            put("sampler_name", request.scheduler.displayName)
             put("send_images", true)
             put("save_images", false)
             if (isImg2Img && initPath != null) {
                 put("init_images", JSONArray().put(encodeImageFileBase64(initPath)))
                 put("denoising_strength", request.img2imgStrength.coerceIn(0.05f, 0.99f).toDouble())
+                if (request.pipelineMode == DiffusionPipelineMode.INPAINT &&
+                    (request.maskStrokes.isNotEmpty() || request.invertMask)
+                ) {
+                    val maskBmp = InpaintMaskProcessor.renderMaskBitmap(
+                        strokes = request.maskStrokes,
+                        width = alignTo64(request.width),
+                        height = alignTo64(request.height),
+                        invert = request.invertMask
+                    )
+                    put("mask", encodeBitmapBase64(maskBmp))
+                    put("mask_blur", request.maskFeatherPx)
+                    maskBmp.recycle()
+                }
             }
             val overrideSettings = JSONObject().apply {
                 put("filter_nsfw", false)
+                put("CLIP_stop_at_last_layers", request.clipSkip.coerceIn(1, 2))
                 if (request.serverModel.isNotBlank()) {
                     put("sd_model_checkpoint", request.serverModel)
                 }
@@ -476,7 +608,7 @@ class LocalImageGenerator(private val context: Context) {
         val imageBytes = httpClient.newCall(reqBuilder.build()).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw IOException("Local WebUI HTTP ${resp.code}: ${body.take(240)}")
+                throw IOException("PC WebUI HTTP ${resp.code}: ${body.take(240)}")
             }
             val json = JSONObject(body)
             val images = json.optJSONArray("images")
@@ -500,7 +632,7 @@ class LocalImageGenerator(private val context: Context) {
             height = actualH,
             seed = request.seed,
             durationMs = System.currentTimeMillis() - startMs,
-            engineLabel = "Local WebUI (A1111/Forge)",
+            engineLabel = "PC WebUI (${request.scheduler.displayName})",
             modelName = request.serverModel.ifBlank { "Active WebUI Checkpoint" }
         )
     }
@@ -597,7 +729,6 @@ class LocalImageGenerator(private val context: Context) {
                 "Server URL must start with http:// or https://"
             }
             val url = when (mode) {
-                ImageGenBackendMode.LOCAL_DREAM_NPU -> "$base/health"
                 ImageGenBackendMode.LOCAL_A1111_FORGE -> "$base/sdapi/v1/sd-models"
                 ImageGenBackendMode.LOCAL_OPENAI_IMAGES -> "$base/models"
                 ImageGenBackendMode.ON_DEVICE_SD_CPP -> return@runCatching emptyList()
@@ -613,33 +744,22 @@ class LocalImageGenerator(private val context: Context) {
             httpClient.newCall(req).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: ${resp.message}")
-                when (mode) {
-                    ImageGenBackendMode.LOCAL_DREAM_NPU -> {
-                        val activeModel = runCatching {
-                            JSONObject(body).optString("model").ifBlank { JSONObject(body).optString("status") }
-                        }.getOrDefault("")
-                        listOf(activeModel.ifBlank { "Local Dream Active QNN/MNN" })
-                    }
-
-                    ImageGenBackendMode.LOCAL_A1111_FORGE -> {
-                        val arr = JSONArray(body)
-                        buildList {
-                            for (i in 0 until arr.length()) {
-                                val obj = arr.optJSONObject(i) ?: continue
-                                val title = obj.optString("title").ifBlank { obj.optString("model_name") }
-                                if (title.isNotBlank()) add(title)
-                            }
+                if (mode == ImageGenBackendMode.LOCAL_A1111_FORGE) {
+                    val arr = JSONArray(body)
+                    buildList {
+                        for (i in 0 until arr.length()) {
+                            val obj = arr.optJSONObject(i) ?: continue
+                            val title = obj.optString("title").ifBlank { obj.optString("model_name") }
+                            if (title.isNotBlank()) add(title)
                         }
                     }
-
-                    else -> {
-                        val obj = JSONObject(body)
-                        val data = obj.optJSONArray("data") ?: JSONArray()
-                        buildList {
-                            for (i in 0 until data.length()) {
-                                val id = data.optJSONObject(i)?.optString("id").orEmpty()
-                                if (id.isNotBlank()) add(id)
-                            }
+                } else {
+                    val obj = JSONObject(body)
+                    val data = obj.optJSONArray("data") ?: JSONArray()
+                    buildList {
+                        for (i in 0 until data.length()) {
+                            val id = data.optJSONObject(i)?.optString("id").orEmpty()
+                            if (id.isNotBlank()) add(id)
                         }
                     }
                 }
@@ -734,6 +854,28 @@ class LocalImageGenerator(private val context: Context) {
         return outFile
     }
 
+    private fun bitmapToRgba(bitmap: Bitmap): ByteArray {
+        val argb = if (bitmap.config != Bitmap.Config.ARGB_8888) {
+            bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            bitmap
+        }
+        val buf = ByteBuffer.allocate(argb.width * argb.height * 4)
+        argb.copyPixelsToBuffer(buf)
+        if (argb !== bitmap) argb.recycle()
+        return buf.array()
+    }
+
+    private fun rgbaToBitmap(rgbaBytes: ByteArray, width: Int, height: Int): Bitmap {
+        val expectedSize = width * height * 4
+        if (rgbaBytes.size < expectedSize) {
+            throw IOException("Native diffusion engine returned incomplete image buffer (${rgbaBytes.size} bytes).")
+        }
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgbaBytes, 0, expectedSize))
+        return bitmap
+    }
+
     private fun loadRgbaBytes(path: String, targetW: Int, targetH: Int): Triple<ByteArray, Int, Int> {
         val raw = BitmapFactory.decodeFile(path)
             ?: throw IOException("Cannot decode img2img reference image.")
@@ -742,25 +884,24 @@ class LocalImageGenerator(private val context: Context) {
         } else {
             raw
         }
-        val argbBitmap = if (scaled.config != Bitmap.Config.ARGB_8888) {
-            scaled.copy(Bitmap.Config.ARGB_8888, false).also { scaled.recycle() }
-        } else {
-            scaled
-        }
-        val buf = ByteBuffer.allocate(argbBitmap.width * argbBitmap.height * 4)
-        argbBitmap.copyPixelsToBuffer(buf)
-        val w = argbBitmap.width
-        val h = argbBitmap.height
-        argbBitmap.recycle()
-        return Triple(buf.array(), w, h)
+        val bytes = bitmapToRgba(scaled)
+        val w = scaled.width
+        val h = scaled.height
+        scaled.recycle()
+        return Triple(bytes, w, h)
     }
 
     private fun encodeImageFileBase64(path: String): String {
         val bmp = BitmapFactory.decodeFile(path)
             ?: throw IOException("Cannot decode reference image.")
-        val baos = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.PNG, 95, baos)
+        val res = encodeBitmapBase64(bmp)
         bmp.recycle()
+        return res
+    }
+
+    private fun encodeBitmapBase64(bitmap: Bitmap): String {
+        val baos = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 95, baos)
         return Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
     }
 

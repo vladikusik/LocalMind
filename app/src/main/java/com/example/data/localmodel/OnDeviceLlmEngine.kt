@@ -1,5 +1,6 @@
 package com.example.data.localmodel
 
+import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
 import com.example.data.attachments.MessageAttachment
@@ -7,21 +8,43 @@ import com.example.data.local.DownloadedModelEntity
 import com.example.data.network.ChatMessageDto
 import com.example.data.network.StreamEvent
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
 import com.llamatik.library.platform.GenStream
 import com.llamatik.library.platform.LlamaBridge
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class OnDeviceLlmEngine(private val context: Context) {
+
+    /**
+     * Dedicated single-thread native executor.
+     * Required by LiteRT-LM (initialize, sendMessageAsync, cancelProcess, close must stay on one thread)
+     * and prevents LlamaBridge SIGSEGV race conditions between cancel/re-init/generate.
+     */
+    private val nativeDispatcher = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "LocalMind-NativeInference").apply {
+            priority = Thread.NORM_PRIORITY + 1
+        }
+    }.asCoroutineDispatcher()
 
     @Volatile
     private var loadedMediaPipePath: String? = null
@@ -32,6 +55,12 @@ class OnDeviceLlmEngine(private val context: Context) {
 
     @Volatile
     private var loadedLlamaPath: String? = null
+    @Volatile
+    private var loadedLlamaProfileKey: String? = null
+    @Volatile
+    private var loadedLlamaProfile: LlamaInitProfile? = null
+    @Volatile
+    private var activeLlamaProfileLabel: String = "llama.cpp"
 
     @Volatile
     private var loadedLiteRtPath: String? = null
@@ -60,13 +89,18 @@ class OnDeviceLlmEngine(private val context: Context) {
             }
         }
 
-        val resolvedEngine = LocalInferenceEngine.resolveForFormat(preferredEngine, model.format)
+        val resolvedEngine = LocalInferenceEngine.resolveForFormat(
+            preferred = preferredEngine,
+            format = model.format,
+            hardwareBackend = hardwareBackend
+        )
 
         return when (resolvedEngine) {
             LocalInferenceEngine.LLAMA_CPP -> streamWithLlamaCpp(
                 model = model,
                 modelFile = modelFile,
                 messages = messages,
+                hardwareBackend = hardwareBackend,
                 threads = threads,
                 temperature = temperature,
                 maxTokens = maxTokens
@@ -76,7 +110,8 @@ class OnDeviceLlmEngine(private val context: Context) {
                 model = model,
                 modelFile = modelFile,
                 messages = messages,
-                hardwareBackend = hardwareBackend
+                hardwareBackend = hardwareBackend,
+                temperature = temperature
             )
 
             LocalInferenceEngine.MEDIAPIPE_GENAI, LocalInferenceEngine.AUTO -> streamWithMediaPipe(
@@ -90,10 +125,25 @@ class OnDeviceLlmEngine(private val context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // 1. GGUF / llama.cpp (Fixed param-before-init order, RAM-adaptive retry,
+    //    GGUF magic verification, per-architecture chat templates, stop-token cut)
+    // -------------------------------------------------------------------------
+
+    private data class LlamaInitProfile(
+        val label: String,
+        val contextLength: Int,
+        val batchSize: Int,
+        val threads: Int,
+        val useMmap: Boolean,
+        val flashAttention: Boolean
+    )
+
     private fun streamWithLlamaCpp(
         model: DownloadedModelEntity,
         modelFile: File,
         messages: List<ChatMessageDto>,
+        hardwareBackend: LocalHardwareBackend,
         threads: Int,
         temperature: Float,
         maxTokens: Int
@@ -106,104 +156,248 @@ class OnDeviceLlmEngine(private val context: Context) {
             close(
                 IOException(
                     "llama.cpp requires a .gguf model file, but '${model.fileName}' is .${model.format}. " +
-                        "Switch engine to Auto or download a GGUF model from Hugging Face."
+                        "Switch engine to Auto or download a GGUF / .litertlm model."
                 )
             )
             return@callbackFlow
         }
 
-        try {
-            synchronized(lock) {
-                if (loadedLlamaPath != modelFile.absolutePath) {
-                    unloadMediaPipeLocked()
-                    unloadLiteRtLocked()
-                    runCatching { LlamaBridge.shutdown() }
-                    val initialized = LlamaBridge.initGenerateModel(modelFile.absolutePath)
-                    if (!initialized) {
-                        throw IOException("llama.cpp failed to load GGUF model: ${model.fileName}")
-                    }
-                    loadedLlamaPath = modelFile.absolutePath
-                }
-            }
-        } catch (t: Throwable) {
-            close(IOException("llama.cpp init error: ${t.localizedMessage ?: t.javaClass.simpleName}", t))
+        // Validate GGUF binary header before touching native C++ so corrupt/HTML files never SIGSEGV
+        val validationError = validateGgufFile(modelFile)
+        if (validationError != null) {
+            close(IOException(validationError))
             return@callbackFlow
         }
 
-        val prompt = formatChatMlPrompt(messages)
-        val modelLabel = "${model.displayName} (llama.cpp)"
-        val startNs = System.nanoTime()
-        var chunkCount = 0
-
-        try {
-            LlamaBridge.updateGenerateParams(
-                temperature = temperature.coerceIn(0.05f, 2.0f),
-                maxTokens = maxTokens.coerceIn(128, 4096),
-                topP = 0.9f,
-                topK = 40,
-                repeatPenalty = 1.1f,
-                contextLength = 4096,
-                numThreads = threads.coerceIn(1, 8),
-                useMmap = true,
-                flashAttention = false,
-                batchSize = 512
-            )
-        } catch (_: Throwable) {
-            // Fall back to default llama.cpp sampling params if unsupported
+        val optimalThreads = computeOptimalLlamaThreads(threads)
+        val availRamMb = queryAvailableRamMb()
+        val modelMb = (modelFile.length() / (1024L * 1024L)).coerceAtLeast(1L)
+        val primaryCtx = when {
+            availRamMb >= 3800L && modelMb <= 3200L -> 4096
+            availRamMb >= 2200L && modelMb <= 4800L -> 2048
+            else -> 1536
         }
 
-        val streamThread = Thread {
+        val requestedKey = "${modelFile.absolutePath}|$optimalThreads|$primaryCtx|${hardwareBackend.id}"
+        val safeTemp = temperature.coerceIn(0.05f, 2.0f)
+        val safeMaxTokens = maxTokens.coerceIn(128, 2048)
+        val finished = AtomicBoolean(false)
+        val doneLatch = CountDownLatch(1)
+
+        val workerJob = launch(nativeDispatcher) {
+            try {
+                synchronized(lock) {
+                    if (loadedLlamaPath != modelFile.absolutePath || loadedLlamaProfileKey != requestedKey) {
+                        unloadMediaPipeLocked()
+                        unloadLiteRtLocked()
+                        unloadLlamaLocked()
+
+                        val profiles = listOf(
+                            LlamaInitProfile(
+                                label = "llama.cpp · ${optimalThreads}T FA",
+                                contextLength = primaryCtx,
+                                batchSize = 256,
+                                threads = optimalThreads,
+                                useMmap = true,
+                                flashAttention = true
+                            ),
+                            LlamaInitProfile(
+                                label = "llama.cpp · ${optimalThreads}T",
+                                contextLength = minOf(primaryCtx, 2048),
+                                batchSize = 128,
+                                threads = optimalThreads,
+                                useMmap = true,
+                                flashAttention = false
+                            ),
+                            LlamaInitProfile(
+                                label = "llama.cpp · Safe Low-RAM",
+                                contextLength = 1024,
+                                batchSize = 64,
+                                threads = minOf(4, optimalThreads),
+                                useMmap = false,
+                                flashAttention = false
+                            )
+                        )
+
+                        var loadedProfile: LlamaInitProfile? = null
+                        var lastErr: Throwable? = null
+                        for (profile in profiles) {
+                            try {
+                                runCatching { LlamaBridge.shutdown() }
+                                // CRITICAL: Always apply hardware/context params BEFORE initGenerateModel!
+                                LlamaBridge.updateGenerateParams(
+                                    temperature = safeTemp,
+                                    maxTokens = safeMaxTokens,
+                                    topP = 0.9f,
+                                    topK = 40,
+                                    repeatPenalty = 1.1f,
+                                    contextLength = profile.contextLength,
+                                    numThreads = profile.threads,
+                                    useMmap = profile.useMmap,
+                                    flashAttention = profile.flashAttention,
+                                    batchSize = profile.batchSize
+                                )
+                                val ok = LlamaBridge.initGenerateModel(modelFile.absolutePath)
+                                if (ok) {
+                                    loadedProfile = profile
+                                    break
+                                }
+                            } catch (t: Throwable) {
+                                lastErr = t
+                            }
+                        }
+
+                        if (loadedProfile == null) {
+                            throw IOException(
+                                "llama.cpp failed to load '${model.fileName}' (${modelMb} MB, free RAM ${availRamMb} MB). " +
+                                    "Try a smaller quantization (Q4_K_M / Q4_0, 1B–3B) or a QNN NPU .litertlm model." +
+                                    (lastErr?.localizedMessage?.let { " Details: $it" } ?: ""),
+                                lastErr
+                            )
+                        }
+
+                        loadedLlamaPath = modelFile.absolutePath
+                        loadedLlamaProfileKey = requestedKey
+                        loadedLlamaProfile = loadedProfile
+                        activeLlamaProfileLabel = loadedProfile.label
+                    } else {
+                        // Model already loaded: preserve active profile's exact memory/context settings
+                        val activeProfile = loadedLlamaProfile
+                        runCatching {
+                            LlamaBridge.updateGenerateParams(
+                                temperature = safeTemp,
+                                maxTokens = safeMaxTokens,
+                                topP = 0.9f,
+                                topK = 40,
+                                repeatPenalty = 1.1f,
+                                contextLength = activeProfile?.contextLength ?: primaryCtx,
+                                numThreads = activeProfile?.threads ?: optimalThreads,
+                                useMmap = activeProfile?.useMmap ?: true,
+                                flashAttention = activeProfile?.flashAttention ?: true,
+                                batchSize = activeProfile?.batchSize ?: 256
+                            )
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                if (finished.compareAndSet(false, true)) {
+                    doneLatch.countDown()
+                    close(IOException(t.localizedMessage ?: "llama.cpp init error", t))
+                }
+                return@launch
+            }
+
+            if (finished.get()) {
+                doneLatch.countDown()
+                return@launch
+            }
+
+            val templateStyle = detectGgufChatTemplate(model.fileName, model.repoId)
+            val prompt = formatGgufPrompt(messages, templateStyle)
+            val stopMarkers = templateStyle.stopMarkers
+            val modelLabel = "${model.displayName} ($activeLlamaProfileLabel)"
+            val startNs = System.nanoTime()
+            var chunkCount = 0
+            val tailBuffer = StringBuilder()
+
             try {
                 LlamaBridge.generateStream(
                     prompt = prompt,
                     callback = object : GenStream {
                         override fun onDelta(text: String) {
-                            if (text.isNotEmpty()) {
-                                chunkCount++
-                                trySend(
-                                    StreamEvent.Chunk(
-                                        contentDelta = text,
-                                        modelName = modelLabel
+                            if (finished.get() || text.isEmpty()) return
+
+                            tailBuffer.append(text)
+                            val recent = tailBuffer.toString()
+                            val hitStop = stopMarkers.firstOrNull { marker -> recent.contains(marker) }
+                            if (hitStop != null) {
+                                val cleanTail = text.substringBefore(hitStop)
+                                if (cleanTail.isNotEmpty()) {
+                                    chunkCount++
+                                    trySend(
+                                        StreamEvent.Chunk(
+                                            contentDelta = cleanTail,
+                                            modelName = modelLabel
+                                        )
                                     )
-                                )
+                                }
+                                if (finished.compareAndSet(false, true)) {
+                                    runCatching { LlamaBridge.nativeCancelGenerate() }
+                                    val elapsedSec = (System.nanoTime() - startNs) / 1_000_000_000f
+                                    val tps = if (chunkCount > 2 && elapsedSec > 0.1f) chunkCount / elapsedSec else null
+                                    trySend(StreamEvent.Completed(tokensPerSecond = tps, modelName = modelLabel))
+                                    doneLatch.countDown()
+                                    close()
+                                }
+                                return
                             }
+                            if (tailBuffer.length > 64) {
+                                tailBuffer.delete(0, tailBuffer.length - 64)
+                            }
+
+                            chunkCount++
+                            trySend(
+                                StreamEvent.Chunk(
+                                    contentDelta = text,
+                                    modelName = modelLabel
+                                )
+                            )
                         }
 
                         override fun onComplete() {
-                            val elapsedSec = (System.nanoTime() - startNs) / 1_000_000_000f
-                            val tps = if (chunkCount > 2 && elapsedSec > 0.1f) chunkCount / elapsedSec else null
-                            trySend(StreamEvent.Completed(tokensPerSecond = tps, modelName = modelLabel))
-                            close()
+                            if (finished.compareAndSet(false, true)) {
+                                val elapsedSec = (System.nanoTime() - startNs) / 1_000_000_000f
+                                val tps = if (chunkCount > 2 && elapsedSec > 0.1f) chunkCount / elapsedSec else null
+                                trySend(StreamEvent.Completed(tokensPerSecond = tps, modelName = modelLabel))
+                                doneLatch.countDown()
+                                close()
+                            }
                         }
 
                         override fun onError(message: String) {
-                            close(IOException("llama.cpp error: $message"))
+                            if (finished.compareAndSet(false, true)) {
+                                doneLatch.countDown()
+                                close(IOException("llama.cpp error: $message"))
+                            }
                         }
                     }
                 )
             } catch (t: Throwable) {
-                close(IOException("llama.cpp generation failed: ${t.localizedMessage}", t))
+                if (finished.compareAndSet(false, true)) {
+                    doneLatch.countDown()
+                    close(IOException("llama.cpp generation failed: ${t.localizedMessage}", t))
+                }
             }
         }
-        streamThread.start()
 
         awaitClose {
-            runCatching { LlamaBridge.nativeCancelGenerate() }
+            if (finished.compareAndSet(false, true)) {
+                runCatching { LlamaBridge.nativeCancelGenerate() }
+                runCatching { doneLatch.await(800, TimeUnit.MILLISECONDS) }
+            }
+            workerJob.cancel()
         }
-    }.flowOn(Dispatchers.IO)
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. Qualcomm QNN Hexagon HTP NPU / LiteRT-LM
+    //    Single-thread executor, ADSP_LIBRARY_PATH configured, clean ConversationConfig,
+    //    QNN HTP graph cache, proper cancelProcess() + close lifecycle
+    // -------------------------------------------------------------------------
 
     private fun streamWithLiteRtLm(
         model: DownloadedModelEntity,
         modelFile: File,
         messages: List<ChatMessageDto>,
-        hardwareBackend: LocalHardwareBackend
+        hardwareBackend: LocalHardwareBackend,
+        temperature: Float
     ): Flow<StreamEvent> = callbackFlow {
         val ext = model.format.lowercase()
         if (ext != "litertlm" && ext != "task") {
             close(
                 IOException(
-                    "LiteRT-LM runs .litertlm or .task bundles, not .${model.format}. " +
-                        "Select Auto engine or llama.cpp for GGUF files."
+                    "LiteRT-LM QNN NPU runs .litertlm or .task bundles, not .${model.format}. " +
+                        "Download a .litertlm model from the NPU QNN preset in Model Hub, or select llama.cpp for .gguf."
                 )
             )
             return@callbackFlow
@@ -212,18 +406,30 @@ class OnDeviceLlmEngine(private val context: Context) {
         val engine = try {
             getOrCreateLiteRtEngine(modelFile.absolutePath, hardwareBackend)
         } catch (t: Throwable) {
-            close(IOException("LiteRT-LM init error: ${t.localizedMessage ?: t.javaClass.simpleName}", t))
+            close(IOException("LiteRT-LM NPU init error: ${t.localizedMessage ?: t.javaClass.simpleName}", t))
             return@callbackFlow
         }
 
-        val prompt = formatGemmaPrompt(messages)
+        val systemMsg = messages.firstOrNull { it.role == "system" }?.content?.trim().orEmpty()
+        val userPayload = buildLiteRtConversationPrompt(messages)
         val modelLabel = "${model.displayName} (LiteRT-LM · $activeLiteRtBackendLabel)"
         val startNs = System.nanoTime()
         var chunkCount = 0
+        var activeConversation: Conversation? = null
 
         try {
-            engine.createConversation().use { conversation ->
-                conversation.sendMessageAsync(prompt).collect { response ->
+            val convConfig = ConversationConfig(
+                systemInstruction = if (systemMsg.isNotBlank()) Contents.of(systemMsg) else null,
+                samplerConfig = SamplerConfig(
+                    topK = 40,
+                    topP = 0.95,
+                    temperature = temperature.coerceIn(0.05f, 1.5f).toDouble()
+                )
+            )
+            val conversation = engine.createConversation(convConfig)
+            activeConversation = conversation
+            conversation.use { conv ->
+                conv.sendMessageAsync(userPayload).collect { response ->
                     val token = response.toString()
                     if (token.isNotEmpty()) {
                         chunkCount++
@@ -236,16 +442,29 @@ class OnDeviceLlmEngine(private val context: Context) {
                     }
                 }
             }
+            activeConversation = null
             val elapsedSec = (System.nanoTime() - startNs) / 1_000_000_000f
             val tps = if (chunkCount > 2 && elapsedSec > 0.1f) chunkCount / elapsedSec else null
             trySend(StreamEvent.Completed(tokensPerSecond = tps, modelName = modelLabel))
             close()
+        } catch (ce: CancellationException) {
+            runCatching { activeConversation?.cancelProcess() }
+            runCatching { activeConversation?.close() }
+            throw ce
         } catch (t: Throwable) {
+            runCatching { activeConversation?.cancelProcess() }
+            runCatching { activeConversation?.close() }
             close(IOException("LiteRT-LM generation failed: ${t.localizedMessage}", t))
         }
 
-        awaitClose { }
-    }.flowOn(Dispatchers.IO)
+        awaitClose {
+            runCatching { activeConversation?.cancelProcess() }
+        }
+    }.flowOn(nativeDispatcher)
+
+    // -------------------------------------------------------------------------
+    // 3. MediaPipe GenAI (.task / .bin CPU/GPU fallback)
+    // -------------------------------------------------------------------------
 
     private fun streamWithMediaPipe(
         model: DownloadedModelEntity,
@@ -274,7 +493,7 @@ class OnDeviceLlmEngine(private val context: Context) {
             return@callbackFlow
         }
 
-        val prompt = formatGemmaPrompt(messages)
+        val prompt = formatGgufPrompt(messages, GgufTemplateStyle.GEMMA)
         val backendTag = when (hardwareBackend) {
             LocalHardwareBackend.NPU -> "GPU/NPU"
             LocalHardwareBackend.GPU -> "GPU"
@@ -326,7 +545,7 @@ class OnDeviceLlmEngine(private val context: Context) {
             runCatching { session.cancelGenerateResponseAsync() }
             runCatching { session.close() }
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(nativeDispatcher)
 
     private fun getOrCreateLiteRtEngine(
         modelPath: String,
@@ -344,16 +563,25 @@ class OnDeviceLlmEngine(private val context: Context) {
             unloadLlamaLocked()
             unloadLiteRtLocked()
 
-            val nativeDir = context.applicationInfo.nativeLibraryDir.orEmpty()
+            // CRITICAL: Set ADSP_LIBRARY_PATH & QNN HTP cache before touching Backend.NPU
+            val qnnStatus = QnnRuntimeConfigurator.configureAndInspect(context)
+            val nativeDir = qnnStatus.nativeLibDir
+            val cacheDir = qnnStatus.qnnCacheDir
+            val npuLabel = if (qnnStatus.isQnnHtpBundled || qnnStatus.isLiteRtDispatchBundled) {
+                "QNN ${qnnStatus.hexagonArch}"
+            } else {
+                "NPU"
+            }
+
             val candidates: List<Pair<String, Backend>> = when (hardwareBackend) {
                 LocalHardwareBackend.NPU -> listOf(
-                    "NPU" to Backend.NPU(nativeLibraryDir = nativeDir),
-                    "GPU (NPU fallback)" to Backend.GPU(),
+                    npuLabel to Backend.NPU(nativeLibraryDir = nativeDir),
+                    "GPU OpenCL (NPU fallback)" to Backend.GPU(),
                     "CPU (NPU fallback)" to Backend.CPU()
                 )
 
                 LocalHardwareBackend.GPU -> listOf(
-                    "GPU" to Backend.GPU(),
+                    "GPU OpenCL" to Backend.GPU(),
                     "CPU (GPU fallback)" to Backend.CPU()
                 )
 
@@ -368,7 +596,7 @@ class OnDeviceLlmEngine(private val context: Context) {
                     val config = EngineConfig(
                         modelPath = modelPath,
                         backend = backend,
-                        cacheDir = context.cacheDir.absolutePath
+                        cacheDir = cacheDir
                     )
                     val created = Engine(config).apply { initialize() }
                     liteRtEngine = created
@@ -380,7 +608,7 @@ class OnDeviceLlmEngine(private val context: Context) {
                     lastError = t
                 }
             }
-            throw lastError ?: IOException("Failed to initialize LiteRT-LM engine on any backend.")
+            throw lastError ?: IOException("Failed to initialize LiteRT-LM engine on NPU/GPU/CPU.")
         }
     }
 
@@ -444,8 +672,11 @@ class OnDeviceLlmEngine(private val context: Context) {
 
     private fun unloadLlamaLocked() {
         if (loadedLlamaPath != null) {
+            runCatching { LlamaBridge.nativeCancelGenerate() }
             runCatching { LlamaBridge.shutdown() }
             loadedLlamaPath = null
+            loadedLlamaProfileKey = null
+            loadedLlamaProfile = null
         }
     }
 
@@ -455,6 +686,83 @@ class OnDeviceLlmEngine(private val context: Context) {
             unloadLiteRtLocked()
             unloadLlamaLocked()
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers: GGUF integrity check, RAM query, thread tuning, chat templates
+    // -------------------------------------------------------------------------
+
+    private fun validateGgufFile(file: File): String? {
+        if (!file.exists()) return "GGUF file not found on disk: ${file.name}"
+        val size = file.length()
+        if (size < 1024L * 1024L) {
+            return "GGUF file '${file.name}' is too small (${size / 1024} KB) — download was likely interrupted or blocked by a Hugging Face login wall. Delete and re-download it."
+        }
+        val header = ByteArray(4)
+        val read = runCatching {
+            FileInputStream(file).use { it.read(header) }
+        }.getOrDefault(0)
+        if (read < 4 ||
+            header[0] != 'G'.code.toByte() ||
+            header[1] != 'G'.code.toByte() ||
+            header[2] != 'U'.code.toByte() ||
+            header[3] != 'F'.code.toByte()
+        ) {
+            return "File '${file.name}' is not a valid GGUF binary (missing GGUF magic header). If downloaded from a gated Hugging Face repo, add your HF token and re-download."
+        }
+        return null
+    }
+
+    private fun queryAvailableRamMb(): Long {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return 2048L
+        val info = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(info)
+        return (info.availMem / (1024L * 1024L)).coerceAtLeast(512L)
+    }
+
+    private fun computeOptimalLlamaThreads(requested: Int): Int {
+        val totalCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+        // On 8-core Snapdragon/Dimensity big.LITTLE SoCs, 4-6 performance threads outperform 8 threads
+        val perfCap = if (totalCores >= 8) 6 else (totalCores - 1).coerceAtLeast(2)
+        return requested.coerceIn(1, perfCap)
+    }
+
+    private enum class GgufTemplateStyle(val stopMarkers: List<String>) {
+        CHATML(listOf("<|im_end|>", "<|endoftext|>", "<|im_start|>user")),
+        LLAMA3(listOf("<|eot_id|>", "<|end_of_text|>", "<|start_header_id|>user")),
+        GEMMA(listOf("<end_of_turn>", "<eos>", "<start_of_turn>user")),
+        PHI3(listOf("<|end|>", "<|endoftext|>", "<|user|>")),
+        MISTRAL(listOf("</s>", "[INST]"))
+    }
+
+    private fun detectGgufChatTemplate(fileName: String, repoId: String): GgufTemplateStyle {
+        val id = "$fileName $repoId".lowercase()
+        return when {
+            id.contains("llama-3") || id.contains("llama3") || id.contains("llama_3") -> GgufTemplateStyle.LLAMA3
+            id.contains("gemma") -> GgufTemplateStyle.GEMMA
+            id.contains("phi-3") || id.contains("phi3") || id.contains("phi-4") || id.contains("phi4") -> GgufTemplateStyle.PHI3
+            id.contains("mistral") || id.contains("mixtral") || id.contains("zephyr") -> GgufTemplateStyle.MISTRAL
+            else -> GgufTemplateStyle.CHATML // Qwen2.5, DeepSeek, SmolLM, Yi, OpenChat, etc.
+        }
+    }
+
+    private fun buildLiteRtConversationPrompt(messages: List<ChatMessageDto>): String {
+        val turns = messages.filter { it.role != "system" }.takeLast(10)
+        if (turns.size <= 1) {
+            return turns.lastOrNull()?.let(::renderMessageWithAttachments).orEmpty()
+        }
+        val history = turns.dropLast(1)
+        val latest = turns.last()
+        return buildString {
+            appendLine("Previous conversation:")
+            history.forEach { msg ->
+                val who = if (msg.role == "user") "User" else "Assistant"
+                appendLine("$who: ${renderMessageWithAttachments(msg)}")
+            }
+            appendLine()
+            append("User: ")
+            append(renderMessageWithAttachments(latest))
+        }.trim()
     }
 
     private fun renderMessageWithAttachments(msg: ChatMessageDto): String {
@@ -482,45 +790,94 @@ class OnDeviceLlmEngine(private val context: Context) {
         }
     }
 
-    private fun formatChatMlPrompt(messages: List<ChatMessageDto>): String {
+    private fun formatGgufPrompt(
+        messages: List<ChatMessageDto>,
+        style: GgufTemplateStyle
+    ): String {
         val systemMsg = messages.firstOrNull { it.role == "system" }?.content?.trim().orEmpty()
         val turns = messages.filter { it.role != "system" }.takeLast(10)
-        return buildString {
-            if (systemMsg.isNotEmpty()) {
-                append("<|im_start|>system\n")
-                append(systemMsg)
-                append("<|im_end|>\n")
-            }
-            turns.forEach { msg ->
-                val role = if (msg.role == "user") "user" else "assistant"
-                append("<|im_start|>")
-                append(role)
-                append("\n")
-                append(renderMessageWithAttachments(msg))
-                append("<|im_end|>\n")
-            }
-            append("<|im_start|>assistant\n")
-        }
-    }
 
-    private fun formatGemmaPrompt(messages: List<ChatMessageDto>): String {
-        val systemMsg = messages.firstOrNull { it.role == "system" }?.content?.trim().orEmpty()
-        val turns = messages.filter { it.role != "system" }.takeLast(8)
-        return buildString {
-            if (systemMsg.isNotEmpty()) {
-                append("<start_of_turn>user\nSystem instructions: ")
-                append(systemMsg)
-                append("\n<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n")
+        return when (style) {
+            GgufTemplateStyle.LLAMA3 -> buildString {
+                append("<|begin_of_text|>")
+                if (systemMsg.isNotEmpty()) {
+                    append("<|start_header_id|>system<|end_header_id|>\n\n")
+                    append(systemMsg)
+                    append("<|eot_id|>")
+                }
+                turns.forEach { msg ->
+                    val role = if (msg.role == "user") "user" else "assistant"
+                    append("<|start_header_id|>$role<|end_header_id|>\n\n")
+                    append(renderMessageWithAttachments(msg))
+                    append("<|eot_id|>")
+                }
+                append("<|start_header_id|>assistant<|end_header_id|>\n\n")
             }
-            turns.forEach { msg ->
-                val tag = if (msg.role == "user") "user" else "model"
-                append("<start_of_turn>")
-                append(tag)
-                append("\n")
-                append(renderMessageWithAttachments(msg))
-                append("<end_of_turn>\n")
+
+            GgufTemplateStyle.GEMMA -> buildString {
+                if (systemMsg.isNotEmpty()) {
+                    append("<start_of_turn>user\nSystem instructions: ")
+                    append(systemMsg)
+                    append("\n<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n")
+                }
+                turns.forEach { msg ->
+                    val tag = if (msg.role == "user") "user" else "model"
+                    append("<start_of_turn>$tag\n")
+                    append(renderMessageWithAttachments(msg))
+                    append("<end_of_turn>\n")
+                }
+                append("<start_of_turn>model\n")
             }
-            append("<start_of_turn>model\n")
+
+            GgufTemplateStyle.PHI3 -> buildString {
+                if (systemMsg.isNotEmpty()) {
+                    append("<|system|>\n$systemMsg<|end|>\n")
+                }
+                turns.forEach { msg ->
+                    val tag = if (msg.role == "user") "user" else "assistant"
+                    append("<|$tag|>\n")
+                    append(renderMessageWithAttachments(msg))
+                    append("<|end|>\n")
+                }
+                append("<|assistant|>\n")
+            }
+
+            GgufTemplateStyle.MISTRAL -> buildString {
+                append("<s>")
+                var systemPending = systemMsg
+                turns.forEach { msg ->
+                    val body = renderMessageWithAttachments(msg)
+                    if (msg.role == "user") {
+                        append("[INST] ")
+                        if (systemPending.isNotEmpty()) {
+                            append(systemPending)
+                            append("\n\n")
+                            systemPending = ""
+                        }
+                        append(body)
+                        append(" [/INST]")
+                    } else {
+                        append(" ")
+                        append(body)
+                        append("</s>")
+                    }
+                }
+            }
+
+            GgufTemplateStyle.CHATML -> buildString {
+                if (systemMsg.isNotEmpty()) {
+                    append("<|im_start|>system\n")
+                    append(systemMsg)
+                    append("<|im_end|>\n")
+                }
+                turns.forEach { msg ->
+                    val role = if (msg.role == "user") "user" else "assistant"
+                    append("<|im_start|>$role\n")
+                    append(renderMessageWithAttachments(msg))
+                    append("<|im_end|>\n")
+                }
+                append("<|im_start|>assistant\n")
+            }
         }
     }
 }

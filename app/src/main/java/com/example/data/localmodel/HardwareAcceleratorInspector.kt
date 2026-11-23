@@ -14,6 +14,8 @@ data class HardwareAcceleratorInfo(
     val hasOpenCl: Boolean,
     val hasVulkan: Boolean,
     val hasNnapi: Boolean,
+    val qnnBundled: Boolean,
+    val hexagonArch: String,
     val cpuCores: Int,
     val totalRamMb: Long,
     val availableRamMb: Long,
@@ -23,6 +25,9 @@ data class HardwareAcceleratorInfo(
 object HardwareAcceleratorInspector {
 
     fun inspect(context: Context): HardwareAcceleratorInfo {
+        // Configure ADSP_LIBRARY_PATH and inspect bundled QNN HTP / LiteRT Dispatch libs immediately
+        val qnnStatus = QnnRuntimeConfigurator.configureAndInspect(context)
+
         val socManufacturer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Build.SOC_MANUFACTURER.orEmpty().trim()
         } else {
@@ -48,7 +53,7 @@ object HardwareAcceleratorInspector {
                     .ifBlank { Build.MODEL ?: "Android Device" }
             }
 
-        val hasQnn = existsAny(
+        val hasSystemQnn = existsAny(
             "/vendor/lib64/libQnnHtp.so",
             "/vendor/lib64/libcdsprpc.so",
             "/system/vendor/lib64/libcdsprpc.so"
@@ -66,14 +71,23 @@ object HardwareAcceleratorInspector {
         val hasVulkan = context.packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL)
         val hasNnapi = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
 
+        val qnnBundledReady = qnnStatus.isQnnHtpBundled || qnnStatus.isLiteRtDispatchBundled
+
         val (npuVendor, npuSupported, npuDetail) = when {
             combined.contains("qcom") || combined.contains("qualcomm") || combined.contains("snapdragon") ||
-                combined.contains("sm8") || combined.contains("sm7") || hasQnn -> {
-                Triple(
-                    "Qualcomm Hexagon NPU (HTP)",
-                    true,
-                    if (hasQnn) "QNN / Hexagon DSP driver detected" else "Snapdragon SoC · LiteRT NPU delegate ready"
-                )
+                combined.contains("sm8") || combined.contains("sm7") || hasSystemQnn -> {
+                val detail = buildString {
+                    append(qnnStatus.hexagonArch)
+                    if (qnnBundledReady) {
+                        append(" · QNN HTP bundled (${qnnStatus.bundledQnnLibCount} libs)")
+                    } else if (hasSystemQnn) {
+                        append(" · System CDSP/QNN driver")
+                    }
+                    if (qnnStatus.adspPathConfigured) {
+                        append(" · ADSP ready")
+                    }
+                }
+                Triple("Qualcomm Hexagon NPU (QNN HTP)", true, detail)
             }
 
             combined.contains("tensor") || combined.contains("gs101") || combined.contains("gs201") ||
@@ -90,7 +104,7 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "MediaTek APU (NeuroPilot)",
                     true,
-                    if (hasNeuron) "NeuroPilot APU driver detected" else "MediaTek Dimensity · LiteRT NPU delegate ready"
+                    if (hasNeuron) "NeuroPilot APU driver detected" else "MediaTek Dimensity · LiteRT NPU ready"
                 )
             }
 
@@ -106,7 +120,7 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "NNAPI / Virtual NPU",
                     false,
-                    "Emulator environment — NPU auto-falls back to GPU/CPU"
+                    "Emulator — NPU auto-falls back to GPU/CPU (QNN libs bundled: ${qnnStatus.bundledQnnLibCount})"
                 )
             }
 
@@ -114,7 +128,11 @@ object HardwareAcceleratorInspector {
                 Triple(
                     "Android NNAPI / NPU",
                     true,
-                    "LiteRT NPU with automatic GPU/CPU fallback"
+                    if (qnnBundledReady) {
+                        "QNN/LiteRT runtime bundled (${qnnStatus.bundledQnnLibCount} libs) · auto GPU/CPU fallback"
+                    } else {
+                        "LiteRT NPU with automatic GPU/CPU fallback"
+                    }
                 )
             }
 
@@ -139,6 +157,8 @@ object HardwareAcceleratorInspector {
             hasOpenCl = hasOpenCl,
             hasVulkan = hasVulkan,
             hasNnapi = hasNnapi,
+            qnnBundled = qnnBundledReady,
+            hexagonArch = qnnStatus.hexagonArch,
             cpuCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1),
             totalRamMb = (memInfo.totalMem / (1024L * 1024L)).coerceAtLeast(0L),
             availableRamMb = (memInfo.availMem / (1024L * 1024L)).coerceAtLeast(0L),

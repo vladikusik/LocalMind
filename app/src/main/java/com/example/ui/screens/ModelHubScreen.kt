@@ -350,15 +350,26 @@ fun ModelHubScreen(
                                         color = npuColor.copy(alpha = 0.16f)
                                     ) {
                                         Text(
-                                            text = stringResource(
-                                                if (hardwareInfo.npuSupported) R.string.npu_status_ready else R.string.npu_status_fallback
-                                            ),
+                                            text = if (hardwareInfo.qnnBundled && hardwareInfo.npuSupported) {
+                                                "QNN ${hardwareInfo.hexagonArch.uppercase()}"
+                                            } else {
+                                                stringResource(
+                                                    if (hardwareInfo.npuSupported) R.string.npu_status_ready else R.string.npu_status_fallback
+                                                )
+                                            },
                                             style = MaterialTheme.typography.labelSmall,
                                             color = npuColor,
                                             modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                                         )
                                     }
                                 }
+                                Text(
+                                    text = hardwareInfo.npuDetail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -439,6 +450,7 @@ fun ModelHubScreen(
                                         DownloadedModelRow(
                                             model = model,
                                             preferredEngine = localEngine,
+                                            hardwareBackend = localBackend,
                                             isActive = isActive,
                                             onActivate = {
                                                 onActivateDownloaded(model)
@@ -594,12 +606,13 @@ fun ModelHubScreen(
 private fun DownloadedModelRow(
     model: DownloadedModelEntity,
     preferredEngine: LocalInferenceEngine,
+    hardwareBackend: LocalHardwareBackend,
     isActive: Boolean,
     onActivate: () -> Unit,
     onDelete: () -> Unit
 ) {
     val studioColors = LocalStudioColors.current
-    val resolvedEngine = LocalInferenceEngine.resolveForFormat(preferredEngine, model.format)
+    val resolvedEngine = LocalInferenceEngine.resolveForFormat(preferredEngine, model.format, hardwareBackend)
     val engineBadge = when {
         model.format.lowercase() in setOf("mnn", "dlc", "qnn", "zip") -> stringResource(R.string.hub_badge_local_dream)
         model.format.lowercase() in setOf("safetensors", "ckpt") -> stringResource(R.string.hub_badge_diffusion)

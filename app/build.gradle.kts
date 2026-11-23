@@ -72,6 +72,11 @@ android {
     jniLibs {
       useLegacyPackaging = true
       excludes += listOf("**/armeabi-v7a/**", "**/x86/**")
+      pickFirsts += listOf(
+        "**/libQnn*.so",
+        "**/libLiteRt*.so",
+        "**/libc++_shared.so"
+      )
     }
   }
   dependenciesInfo {
@@ -133,6 +138,8 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   // implementation(libs.logging.interceptor)
   implementation(libs.litertlm.android)
+  implementation(libs.litert.npu.qualcomm)
+  implementation(libs.qualcomm.qnn.runtime)
   implementation(libs.llamatik.library)
   implementation(libs.mediapipe.tasks.genai)
   implementation(libs.moshi.kotlin)

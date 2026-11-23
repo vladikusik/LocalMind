@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.data.imagegen.DiffusionScheduler
 import com.example.data.imagegen.ImageGenBackendMode
 import com.example.data.localmodel.LocalHardwareBackend
 import com.example.data.localmodel.LocalInferenceEngine
@@ -45,7 +46,7 @@ data class AppSettings(
     val providerConfigs: Map<ApiProvider, ProviderConfig> = emptyMap(),
     val activeLocalModelId: String = "",
     val localEngine: LocalInferenceEngine = LocalInferenceEngine.AUTO,
-    val localBackend: LocalHardwareBackend = LocalHardwareBackend.CPU,
+    val localBackend: LocalHardwareBackend = LocalHardwareBackend.NPU,
     val localThreads: Int = 4,
     val activeAgentId: String = "",
     val enableBuiltInTools: Boolean = true,
@@ -59,7 +60,6 @@ data class AppSettings(
     val voiceLocale: VoiceLocale = VoiceLocale.AUTO,
     val appLanguage: AppLanguage = AppLanguage.SYSTEM,
     val imageGenMode: ImageGenBackendMode = ImageGenBackendMode.ON_DEVICE_SD_CPP,
-    val localDreamUrl: String = ImageGenBackendMode.LOCAL_DREAM_NPU.defaultUrl,
     val imageServerUrl: String = ImageGenBackendMode.LOCAL_A1111_FORGE.defaultUrl,
     val imageServerApiKey: String = "",
     val imageServerModel: String = "",
@@ -68,6 +68,10 @@ data class AppSettings(
     val imageHeight: Int = 512,
     val imageSteps: Int = 16,
     val imageCfgScale: Float = 7.0f,
+    val imageScheduler: DiffusionScheduler = DiffusionScheduler.DPM_PP_2M_KARRAS,
+    val imageClipSkip: Int = 1,
+    val imageBatchCount: Int = 1,
+    val imageHiResFix: Boolean = false,
     val githubUpdateRepo: String = "",
     val autoCheckUpdates: Boolean = true,
     val dismissedUpdateTag: String = ""
@@ -110,7 +114,6 @@ class SettingsRepository(private val context: Context) {
         val VOICE_LOCALE = stringPreferencesKey("voice_locale")
         val APP_LANGUAGE = stringPreferencesKey("app_language")
         val IMAGE_GEN_MODE = stringPreferencesKey("image_gen_mode")
-        val LOCAL_DREAM_URL = stringPreferencesKey("local_dream_url")
         val IMAGE_SERVER_URL = stringPreferencesKey("image_server_url")
         val IMAGE_SERVER_KEY = stringPreferencesKey("image_server_key")
         val IMAGE_SERVER_MODEL = stringPreferencesKey("image_server_model")
@@ -119,6 +122,10 @@ class SettingsRepository(private val context: Context) {
         val IMAGE_HEIGHT = intPreferencesKey("image_height")
         val IMAGE_STEPS = intPreferencesKey("image_steps")
         val IMAGE_CFG = floatPreferencesKey("image_cfg")
+        val IMAGE_SCHEDULER = stringPreferencesKey("image_scheduler")
+        val IMAGE_CLIP_SKIP = intPreferencesKey("image_clip_skip")
+        val IMAGE_BATCH_COUNT = intPreferencesKey("image_batch_count")
+        val IMAGE_HIRES_FIX = booleanPreferencesKey("image_hires_fix")
         val GITHUB_UPDATE_REPO = stringPreferencesKey("github_update_repo")
         val AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
         val DISMISSED_UPDATE_TAG = stringPreferencesKey("dismissed_update_tag")
@@ -170,7 +177,6 @@ class SettingsRepository(private val context: Context) {
             } ?: VoiceLocale.AUTO,
             appLanguage = AppLanguage.fromCode(prefs[Keys.APP_LANGUAGE]),
             imageGenMode = ImageGenBackendMode.fromId(prefs[Keys.IMAGE_GEN_MODE]),
-            localDreamUrl = prefs[Keys.LOCAL_DREAM_URL] ?: ImageGenBackendMode.LOCAL_DREAM_NPU.defaultUrl,
             imageServerUrl = prefs[Keys.IMAGE_SERVER_URL] ?: ImageGenBackendMode.LOCAL_A1111_FORGE.defaultUrl,
             imageServerApiKey = prefs[Keys.IMAGE_SERVER_KEY] ?: "",
             imageServerModel = prefs[Keys.IMAGE_SERVER_MODEL] ?: "",
@@ -179,6 +185,10 @@ class SettingsRepository(private val context: Context) {
             imageHeight = (prefs[Keys.IMAGE_HEIGHT] ?: 512).coerceIn(256, 1024),
             imageSteps = (prefs[Keys.IMAGE_STEPS] ?: 16).coerceIn(1, 50),
             imageCfgScale = (prefs[Keys.IMAGE_CFG] ?: 7.0f).coerceIn(1.0f, 15.0f),
+            imageScheduler = DiffusionScheduler.fromId(prefs[Keys.IMAGE_SCHEDULER]),
+            imageClipSkip = (prefs[Keys.IMAGE_CLIP_SKIP] ?: 1).coerceIn(1, 2),
+            imageBatchCount = (prefs[Keys.IMAGE_BATCH_COUNT] ?: 1).coerceIn(1, 4),
+            imageHiResFix = prefs[Keys.IMAGE_HIRES_FIX] ?: false,
             githubUpdateRepo = prefs[Keys.GITHUB_UPDATE_REPO] ?: "",
             autoCheckUpdates = prefs[Keys.AUTO_CHECK_UPDATES] ?: true,
             dismissedUpdateTag = prefs[Keys.DISMISSED_UPDATE_TAG] ?: ""
@@ -265,17 +275,10 @@ class SettingsRepository(private val context: Context) {
     suspend fun updateImageGenMode(mode: ImageGenBackendMode) {
         context.settingsDataStore.edit { prefs ->
             prefs[Keys.IMAGE_GEN_MODE] = mode.id
-            if (mode != ImageGenBackendMode.LOCAL_DREAM_NPU &&
-                mode.defaultUrl.isNotBlank() &&
-                prefs[Keys.IMAGE_SERVER_URL].isNullOrBlank()
-            ) {
+            if (mode.defaultUrl.isNotBlank() && prefs[Keys.IMAGE_SERVER_URL].isNullOrBlank()) {
                 prefs[Keys.IMAGE_SERVER_URL] = mode.defaultUrl
             }
         }
-    }
-
-    suspend fun updateLocalDreamUrl(url: String) {
-        context.settingsDataStore.edit { it[Keys.LOCAL_DREAM_URL] = url.trim() }
     }
 
     suspend fun updateImageServerUrl(url: String) {
@@ -307,6 +310,22 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun updateImageCfgScale(cfg: Float) {
         context.settingsDataStore.edit { it[Keys.IMAGE_CFG] = cfg.coerceIn(1.0f, 15.0f) }
+    }
+
+    suspend fun updateImageScheduler(scheduler: DiffusionScheduler) {
+        context.settingsDataStore.edit { it[Keys.IMAGE_SCHEDULER] = scheduler.id }
+    }
+
+    suspend fun updateImageClipSkip(clipSkip: Int) {
+        context.settingsDataStore.edit { it[Keys.IMAGE_CLIP_SKIP] = clipSkip.coerceIn(1, 2) }
+    }
+
+    suspend fun updateImageBatchCount(count: Int) {
+        context.settingsDataStore.edit { it[Keys.IMAGE_BATCH_COUNT] = count.coerceIn(1, 4) }
+    }
+
+    suspend fun updateImageHiResFix(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.IMAGE_HIRES_FIX] = enabled }
     }
 
     suspend fun updateGitHubUpdateRepo(repo: String) {

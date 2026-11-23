@@ -266,16 +266,47 @@
     <string name="image_studio_reuse_settings">Reuse Prompt &amp; Seed</string>
     <string name="settings_open_image_studio">Open Local Uncensored Image Studio</string>
 
-    <!-- Local Dream (xororz/local-dream) Integration -->
-    <string name="hub_preset_local_dream">Local Dream (QNN/MNN)</string>
-    <string name="hub_badge_local_dream">Local Dream NPU/MNN</string>
-    <string name="image_studio_mode_local_dream">Local Dream (NPU)</string>
-    <string name="local_dream_url_label">Local Dream Server URL</string>
-    <string name="local_dream_models_title">Local Dream Models (xororz QNN / MNN)</string>
-    <string name="local_dream_browse_xororz">Browse xororz QNN/MNN</string>
-    <string name="local_dream_open_github">GitHub Repo</string>
-    <string name="local_dream_tip">Connects directly to Local Dream’s local NPU/MNN API (127.0.0.1:8081) with live SSE progress and supports downloading xororz QNN/MNN model packs from Hugging Face.</string>
-    <string name="local_dream_check_health">Check Local Dream (/health)</string>
+    <!-- Built-in On-Device Diffusion Studio (Local Dream Features) -->
+    <string name="hub_preset_local_dream">Local Dream (xororz)</string>
+    <string name="hub_badge_local_dream">Local Dream Pack</string>
+    <string name="studio_tab_txt2img">Txt2Img</string>
+    <string name="studio_tab_img2img">Img2Img</string>
+    <string name="studio_tab_inpaint">Inpaint</string>
+    <string name="studio_tab_upscale">Upscale</string>
+    <string name="studio_ready_models_title">Quick-Install On-Device Models</string>
+    <string name="studio_ready_models_hint">Runs 100% natively inside LocalMind (no external server). Tap any preset to download from Hugging Face or import .safetensors / .ckpt / .gguf / .zip.</string>
+    <string name="studio_scheduler_label">Scheduler / Sampler</string>
+    <string name="studio_batch_label">Batch Count</string>
+    <string name="studio_clip_skip_label">CLIP Skip</string>
+    <string name="studio_hires_fix_label">HiRes Fix (2× Detail Pass)</string>
+    <string name="studio_hires_fix_desc">Automatically upscales 512px output to 1024px and runs a 2nd refinement pass</string>
+    <string name="studio_seed_lock">Lock Seed</string>
+    <string name="studio_seed_unlock">Random Seed</string>
+    <string name="studio_negative_presets_label">Negative Presets</string>
+    <string name="image_studio_inpaint_hint">Paint over the area you want to edit or replace, then describe what should appear there.</string>
+    <string name="inpaint_pick_source_prompt">Pick a photo from your device or tap “Inpaint” on any gallery image below to paint a mask.</string>
+    <string name="inpaint_mask_strokes_badge">Mask strokes: %1$d</string>
+    <string name="inpaint_mask_inverted_badge">Inverted mask · %1$d strokes</string>
+    <string name="inpaint_tool_brush">Brush</string>
+    <string name="inpaint_tool_eraser">Eraser</string>
+    <string name="inpaint_tool_invert">Invert</string>
+    <string name="inpaint_tool_undo">Undo</string>
+    <string name="inpaint_tool_clear">Clear Mask</string>
+    <string name="inpaint_brush_size">Brush Size</string>
+    <string name="inpaint_feather_label">Edge Feather Blur</string>
+    <string name="upscale_title">On-Device Upscaler &amp; UltraFix</string>
+    <string name="upscale_desc">Enhance resolution 2×/4× instantly with progressive detail sharpening, or run a 2× HiRes Diffusion refinement pass.</string>
+    <string name="upscale_method_sharp_2x">2× Sharp (Instant)</string>
+    <string name="upscale_method_sharp_4x">4× Ultra (Instant)</string>
+    <string name="upscale_method_hires_2x">2× HiRes Diffusion</string>
+    <string name="upscale_action_button">Upscale Image Now</string>
+    <string name="upscale_denoise_label">Refinement Strength</string>
+    <string name="image_studio_action_upscale">Upscale 2×</string>
+    <string name="image_studio_action_img2img">To Img2Img</string>
+    <string name="image_studio_action_inpaint">Inpaint</string>
+    <string name="image_studio_generate_batch">Generate %1$d Images</string>
+    <string name="image_studio_inpaint_generate">Run Inpaint Locally</string>
+    <string name="image_studio_external_toggle">Optional PC Server (A1111 / OpenAI)</string>
 
     <!-- GitHub Releases Auto-Update System -->
     <string name="settings_section_updates">App Updates (GitHub)</string>

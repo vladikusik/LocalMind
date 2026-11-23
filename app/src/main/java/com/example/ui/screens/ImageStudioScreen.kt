@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -30,30 +29,19 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Casino
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Brush
 import androidx.compose.material.icons.rounded.CloudDownload
-import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.FileOpen
+import androidx.compose.material.icons.rounded.Hd
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LockOpen
-import androidx.compose.material.icons.rounded.Memory
-import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.PhotoLibrary
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -88,33 +76,34 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.data.imagegen.DiffusionPipelineMode
+import com.example.data.imagegen.DiffusionScheduler
 import com.example.data.imagegen.GeneratedImageEntity
 import com.example.data.imagegen.ImageGenBackendMode
 import com.example.data.imagegen.ImageStudioUiState
 import com.example.data.imagegen.LocalDreamCatalog
-import com.example.data.updates.GitHubUpdateManager
+import com.example.data.imagegen.MaskStroke
+import com.example.data.imagegen.UpscaleMethod
 import com.example.data.local.DownloadedModelEntity
 import com.example.data.localmodel.HardwareAcceleratorInfo
 import com.example.data.localmodel.LocalHardwareBackend
 import com.example.data.preferences.AppSettings
+import com.example.ui.components.DiffusionModelManagerCard
+import com.example.ui.components.DiffusionParametersCard
+import com.example.ui.components.GeneratedImageLightbox
+import com.example.ui.components.InpaintMaskCanvas
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LiquidGlassBackdrop
 import com.example.ui.theme.LiquidGlassCard
 import com.example.ui.theme.LocalStudioColors
 import java.io.File
 import java.util.Locale
-import kotlin.math.roundToInt
-import kotlin.random.Random
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -128,12 +117,12 @@ fun ImageStudioScreen(
     onClearNotice: () -> Unit,
     onNavigateBack: () -> Unit,
     onOpenDiffusionHub: () -> Unit,
-    onOpenLocalDreamHub: () -> Unit,
+    onSearchModelPreset: (String) -> Unit,
     onImportCheckpointUri: (Uri) -> Unit,
     onSelectMode: (ImageGenBackendMode) -> Unit,
+    onSelectPipeline: (DiffusionPipelineMode) -> Unit,
     onSelectBackend: (LocalHardwareBackend) -> Unit,
     onSelectLocalCheckpoint: (String) -> Unit,
-    onUpdateLocalDreamUrl: (String) -> Unit,
     onUpdateServerUrl: (String) -> Unit,
     onUpdateServerModel: (String) -> Unit,
     onProbeServer: () -> Unit,
@@ -143,12 +132,27 @@ fun ImageStudioScreen(
     onPickReferencePhoto: (Uri) -> Unit,
     onClearReferencePhoto: () -> Unit,
     onUpdateStrength: (Float) -> Unit,
+    onAddMaskStroke: (MaskStroke) -> Unit,
+    onUndoMaskStroke: () -> Unit,
+    onClearMask: () -> Unit,
+    onToggleInvertMask: () -> Unit,
+    onUpdateMaskFeather: (Int) -> Unit,
+    onUpdateUpscaleMethod: (UpscaleMethod) -> Unit,
+    onUpdateUpscaleDenoise: (Float) -> Unit,
     onUpdateSize: (Int, Int) -> Unit,
+    onUpdateScheduler: (DiffusionScheduler) -> Unit,
     onUpdateSteps: (Int) -> Unit,
     onUpdateCfgScale: (Float) -> Unit,
+    onUpdateClipSkip: (Int) -> Unit,
+    onUpdateBatchCount: (Int) -> Unit,
+    onUpdateHiResFix: (Boolean) -> Unit,
     onUpdateSeed: (String) -> Unit,
+    onToggleSeedLock: () -> Unit,
     onGenerate: () -> Unit,
     onStopGenerate: () -> Unit,
+    onQuickUpscaleImage: (GeneratedImageEntity) -> Unit,
+    onSendToImg2Img: (GeneratedImageEntity) -> Unit,
+    onSendToInpaint: (GeneratedImageEntity) -> Unit,
     onSaveToGallery: (GeneratedImageEntity) -> Unit,
     onSendToChat: (GeneratedImageEntity) -> Unit,
     onReuseSettings: (GeneratedImageEntity) -> Unit,
@@ -157,12 +161,8 @@ fun ImageStudioScreen(
 ) {
     BackHandler(onBack = onNavigateBack)
 
-    val context = LocalContext.current
     val studioColors = LocalStudioColors.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var localDreamUrlDraft by remember(settings.localDreamUrl) { mutableStateOf(settings.localDreamUrl) }
-    var serverUrlDraft by remember(settings.imageServerUrl) { mutableStateOf(settings.imageServerUrl) }
-    var serverModelDraft by remember(settings.imageServerModel) { mutableStateOf(settings.imageServerModel) }
     var inspectedImage by remember { mutableStateOf<GeneratedImageEntity?>(null) }
 
     val diffusionModels = remember(downloadedModels) {
@@ -292,7 +292,39 @@ fun ImageStudioScreen(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // 1. Live Preview Stage (shows latest generated image or generating spinner)
+                    // 1. Local Dream Core Pipeline Tabs: Txt2Img | Img2Img | Inpaint | Upscale
+                    item(key = "pipeline_tabs") {
+                        SingleChoiceSegmentedButtonRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("studio_pipeline_tabs")
+                        ) {
+                            val tabs = listOf(
+                                DiffusionPipelineMode.TXT2IMG to stringResource(R.string.studio_tab_txt2img),
+                                DiffusionPipelineMode.IMG2IMG to stringResource(R.string.studio_tab_img2img),
+                                DiffusionPipelineMode.INPAINT to stringResource(R.string.studio_tab_inpaint),
+                                DiffusionPipelineMode.UPSCALE to stringResource(R.string.studio_tab_upscale)
+                            )
+                            tabs.forEachIndexed { idx, (mode, label) ->
+                                SegmentedButton(
+                                    selected = studioState.pipelineMode == mode,
+                                    onClick = { onSelectPipeline(mode) },
+                                    shape = SegmentedButtonDefaults.itemShape(idx, tabs.size),
+                                    icon = {},
+                                    modifier = Modifier.testTag("studio_tab_${mode.id}")
+                                ) {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Live Preview Stage (with quick Inpaint / Upscale / Save / Send actions)
                     if (activePreviewImage != null || studioState.isGenerating) {
                         item(key = "preview_stage") {
                             LiquidGlassCard(
@@ -333,7 +365,7 @@ fun ImageStudioScreen(
                                         if (studioState.isGenerating) {
                                             Surface(
                                                 shape = RoundedCornerShape(16.dp),
-                                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
                                                 modifier = Modifier.padding(16.dp)
                                             ) {
                                                 Column(
@@ -348,7 +380,7 @@ fun ImageStudioScreen(
                                                         style = MaterialTheme.typography.labelLarge,
                                                         color = MaterialTheme.colorScheme.onSurface
                                                     )
-                                                    LinearProgressIndicator(modifier = Modifier.width(180.dp))
+                                                    LinearProgressIndicator(modifier = Modifier.width(190.dp))
                                                 }
                                             }
                                         }
@@ -368,7 +400,28 @@ fun ImageStudioScreen(
                                                 overflow = TextOverflow.Ellipsis,
                                                 modifier = Modifier.weight(1f)
                                             )
-                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                IconButton(
+                                                    onClick = { onQuickUpscaleImage(activePreviewImage) },
+                                                    enabled = !studioState.isGenerating,
+                                                    modifier = Modifier.testTag("image_preview_upscale_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Hd,
+                                                        contentDescription = stringResource(R.string.image_studio_action_upscale),
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                                IconButton(
+                                                    onClick = { onSendToInpaint(activePreviewImage) },
+                                                    modifier = Modifier.testTag("image_preview_inpaint_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Brush,
+                                                        contentDescription = stringResource(R.string.image_studio_action_inpaint),
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
                                                 IconButton(
                                                     onClick = { onSaveToGallery(activePreviewImage) },
                                                     modifier = Modifier.testTag("image_preview_save_button")
@@ -400,8 +453,8 @@ fun ImageStudioScreen(
                         }
                     }
 
-                    // 2. Engine & Hardware / Checkpoint Card
-                    item(key = "engine_checkpoint_card") {
+                    // 3. Pipeline Workspace Card (Prompt / Img2Img / Interactive Inpaint Mask Canvas / Upscaler)
+                    item(key = "workspace_card") {
                         LiquidGlassCard(
                             shape = RoundedCornerShape(22.dp),
                             elevated = true,
@@ -411,546 +464,50 @@ fun ImageStudioScreen(
                                 modifier = Modifier.padding(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = MaterialTheme.colorScheme.primaryContainer,
-                                        modifier = Modifier.size(32.dp)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.Memory,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                    }
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = hardwareInfo.npuVendor,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Text(
-                                            text = hardwareInfo.npuDetail,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-
-                                // Mode selector chips
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    val modes = listOf(
-                                        ImageGenBackendMode.ON_DEVICE_SD_CPP to stringResource(R.string.image_studio_mode_on_device),
-                                        ImageGenBackendMode.LOCAL_DREAM_NPU to stringResource(R.string.image_studio_mode_local_dream),
-                                        ImageGenBackendMode.LOCAL_A1111_FORGE to stringResource(R.string.image_studio_mode_a1111),
-                                        ImageGenBackendMode.LOCAL_OPENAI_IMAGES to stringResource(R.string.image_studio_mode_openai)
-                                    )
-                                    modes.forEach { (mode, label) ->
-                                        FilterChip(
-                                            selected = settings.imageGenMode == mode,
-                                            onClick = { onSelectMode(mode) },
-                                            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
-                                            modifier = Modifier.testTag("image_mode_${mode.id}")
-                                        )
-                                    }
-                                }
-
-                                // Compute backend selector (CPU / GPU / NPU)
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
+                                if (studioState.pipelineMode == DiffusionPipelineMode.UPSCALE) {
                                     Text(
-                                        text = stringResource(R.string.settings_local_backend_label),
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    SingleChoiceSegmentedButtonRow(
-                                        modifier = Modifier.testTag("image_studio_backend_segmented")
-                                    ) {
-                                        val backends = listOf(
-                                            LocalHardwareBackend.CPU to stringResource(R.string.backend_cpu),
-                                            LocalHardwareBackend.GPU to stringResource(R.string.backend_gpu),
-                                            LocalHardwareBackend.NPU to stringResource(R.string.backend_npu)
-                                        )
-                                        backends.forEachIndexed { idx, (backend, label) ->
-                                            SegmentedButton(
-                                                selected = settings.localBackend == backend,
-                                                onClick = { onSelectBackend(backend) },
-                                                shape = SegmentedButtonDefaults.itemShape(idx, backends.size),
-                                                icon = {}
-                                            ) {
-                                                Text(label, style = MaterialTheme.typography.labelSmall)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (settings.imageGenMode == ImageGenBackendMode.ON_DEVICE_SD_CPP) {
-                                    Text(
-                                        text = stringResource(R.string.image_studio_checkpoint_label),
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-
-                                    if (diffusionModels.isEmpty()) {
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Text(
-                                                text = stringResource(R.string.image_studio_no_checkpoint),
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.padding(12.dp)
-                                            )
-                                        }
-                                    } else {
-                                        FlowRow(
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            diffusionModels.forEach { model ->
-                                                val selected = settings.activeImageModelId == model.id ||
-                                                    (settings.activeImageModelId.isBlank() && diffusionModels.first().id == model.id)
-                                                FilterChip(
-                                                    selected = selected,
-                                                    onClick = { onSelectLocalCheckpoint(model.id) },
-                                                    leadingIcon = if (selected) {
-                                                        {
-                                                            Icon(
-                                                                Icons.Rounded.CheckCircle,
-                                                                contentDescription = null,
-                                                                modifier = Modifier.size(16.dp)
-                                                            )
-                                                        }
-                                                    } else null,
-                                                    label = {
-                                                        Text(
-                                                            text = "${model.displayName} (.${model.format})",
-                                                            style = MaterialTheme.typography.labelMedium,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                    }
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        OutlinedButton(
-                                            onClick = { checkpointPicker.launch(arrayOf("*/*")) },
-                                            shape = RoundedCornerShape(14.dp),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("image_import_checkpoint_button")
-                                        ) {
-                                            Icon(Icons.Rounded.FileOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(6.dp))
-                                            Text(
-                                                text = stringResource(R.string.image_studio_import_checkpoint),
-                                                style = MaterialTheme.typography.labelMedium,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        FilledTonalButton(
-                                            onClick = onOpenDiffusionHub,
-                                            shape = RoundedCornerShape(14.dp),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("image_open_hf_diffusion_button")
-                                        ) {
-                                            Icon(Icons.Rounded.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(6.dp))
-                                            Text(
-                                                text = stringResource(R.string.image_studio_browse_hf),
-                                                style = MaterialTheme.typography.labelMedium,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                } else if (settings.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
-                                    Text(
-                                        text = stringResource(R.string.local_dream_models_title),
-                                        style = MaterialTheme.typography.labelLarge,
+                                        text = stringResource(R.string.upscale_title),
+                                        style = MaterialTheme.typography.titleMedium,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                     Text(
-                                        text = stringResource(R.string.local_dream_tip),
+                                        text = stringResource(R.string.upscale_desc),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
 
-                                    OutlinedTextField(
-                                        value = localDreamUrlDraft,
-                                        onValueChange = {
-                                            localDreamUrlDraft = it
-                                            onUpdateLocalDreamUrl(it)
-                                        },
-                                        label = { Text(stringResource(R.string.local_dream_url_label)) },
-                                        placeholder = { Text(LocalDreamCatalog.DEFAULT_SERVER_URL) },
-                                        singleLine = true,
-                                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("local_dream_url_input")
-                                    )
-
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        listOf(
-                                            "On-Device (8081)" to "http://127.0.0.1:8081",
-                                            stringResource(R.string.preset_emulator) to "http://10.0.2.2:8081",
-                                            stringResource(R.string.preset_lan) to "http://192.168.1.100:8081"
-                                        ).forEach { (label, presetUrl) ->
-                                            FilterChip(
-                                                selected = localDreamUrlDraft.trim() == presetUrl,
-                                                onClick = {
-                                                    localDreamUrlDraft = presetUrl
-                                                    onUpdateLocalDreamUrl(presetUrl)
-                                                },
-                                                label = { Text(label, style = MaterialTheme.typography.labelSmall) }
-                                            )
-                                        }
-                                    }
-
-                                    // Curated xororz/local-dream model presets (QNN NPU & MNN CPU/GPU)
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        LocalDreamCatalog.curatedRepos.forEach { preset ->
-                                            FilterChip(
-                                                selected = serverModelDraft == preset.repoId,
-                                                onClick = {
-                                                    serverModelDraft = preset.repoId
-                                                    onUpdateServerModel(preset.repoId)
-                                                },
-                                                label = {
-                                                    Text(
-                                                        text = "${preset.repoId.substringAfter('/')} · ${preset.runtimeTag}",
-                                                        style = MaterialTheme.typography.labelSmall
-                                                    )
-                                                },
-                                                modifier = Modifier.testTag("local_dream_preset_${preset.repoId.replace('/', '_')}")
-                                            )
-                                        }
-                                    }
-
-                                    FilledTonalButton(
-                                        onClick = onProbeServer,
-                                        enabled = !studioState.isProbingServer,
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("local_dream_health_button")
-                                    ) {
-                                        if (studioState.isProbingServer) {
-                                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
-                                        } else {
-                                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        }
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(stringResource(R.string.local_dream_check_health))
-                                    }
-
-                                    if (!studioState.serverStatus.isNullOrBlank()) {
-                                        Text(
-                                            text = studioState.serverStatus,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-
+                                    val upscaleSource = studioState.initImagePath ?: activePreviewImage?.localPath
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        FilledTonalButton(
-                                            onClick = onOpenLocalDreamHub,
-                                            shape = RoundedCornerShape(14.dp),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("local_dream_browse_hf_button")
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            modifier = Modifier.weight(1f)
                                         ) {
-                                            Icon(Icons.Rounded.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(6.dp))
-                                            Text(
-                                                text = stringResource(R.string.local_dream_browse_xororz),
-                                                style = MaterialTheme.typography.labelMedium,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        OutlinedButton(
-                                            onClick = {
-                                                if (GitHubUpdateManager.isTrustedGitHubUrl(LocalDreamCatalog.GITHUB_URL)) {
-                                                    runCatching {
-                                                        context.startActivity(
-                                                            Intent(Intent.ACTION_VIEW, Uri.parse(LocalDreamCatalog.GITHUB_URL))
-                                                        )
-                                                    }
-                                                }
-                                            },
-                                            shape = RoundedCornerShape(14.dp),
-                                            modifier = Modifier.testTag("local_dream_open_github_button")
-                                        ) {
-                                            Icon(Icons.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(6.dp))
-                                            Text(
-                                                text = stringResource(R.string.local_dream_open_github),
-                                                style = MaterialTheme.typography.labelMedium
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    OutlinedTextField(
-                                        value = serverUrlDraft,
-                                        onValueChange = {
-                                            serverUrlDraft = it
-                                            onUpdateServerUrl(it)
-                                        },
-                                        label = { Text(stringResource(R.string.image_studio_server_url)) },
-                                        placeholder = { Text(settings.imageGenMode.defaultUrl) },
-                                        singleLine = true,
-                                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("image_server_url_input")
-                                    )
-
-                                    val defaultPort = if (settings.imageGenMode == ImageGenBackendMode.LOCAL_A1111_FORGE) "7860" else "1234/v1"
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        listOf(
-                                            stringResource(R.string.preset_emulator) to "http://10.0.2.2:$defaultPort",
-                                            stringResource(R.string.preset_localhost) to "http://127.0.0.1:$defaultPort",
-                                            stringResource(R.string.preset_lan) to "http://192.168.1.100:$defaultPort"
-                                        ).forEach { (label, presetUrl) ->
-                                            FilterChip(
-                                                selected = serverUrlDraft.trim() == presetUrl,
-                                                onClick = {
-                                                    serverUrlDraft = presetUrl
-                                                    onUpdateServerUrl(presetUrl)
-                                                },
-                                                label = { Text(label, style = MaterialTheme.typography.labelSmall) }
-                                            )
-                                        }
-                                    }
-
-                                    OutlinedTextField(
-                                        value = serverModelDraft,
-                                        onValueChange = {
-                                            serverModelDraft = it
-                                            onUpdateServerModel(it)
-                                        },
-                                        label = { Text(stringResource(R.string.image_studio_server_model)) },
-                                        singleLine = true,
-                                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-
-                                    FilledTonalButton(
-                                        onClick = onProbeServer,
-                                        enabled = !studioState.isProbingServer,
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("image_probe_server_button")
-                                    ) {
-                                        if (studioState.isProbingServer) {
-                                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
-                                        } else {
-                                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        }
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(stringResource(R.string.image_studio_probe_server))
-                                    }
-
-                                    if (!studioState.serverStatus.isNullOrBlank()) {
-                                        Text(
-                                            text = studioState.serverStatus,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-
-                                    if (studioState.serverModels.isNotEmpty()) {
-                                        FlowRow(
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            studioState.serverModels.take(8).forEach { m ->
-                                                FilterChip(
-                                                    selected = serverModelDraft == m,
-                                                    onClick = {
-                                                        serverModelDraft = m
-                                                        onUpdateServerModel(m)
-                                                    },
-                                                    label = {
-                                                        Text(
-                                                            text = m.substringAfterLast('/'),
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                    }
+                                            if (!upscaleSource.isNullOrBlank() && File(upscaleSource).exists()) {
+                                                AsyncImage(
+                                                    model = File(upscaleSource),
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .size(56.dp)
+                                                        .clip(RoundedCornerShape(12.dp))
                                                 )
                                             }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 3. Prompt & Negative Prompt Card
-                    item(key = "prompt_card") {
-                        LiquidGlassCard(
-                            shape = RoundedCornerShape(22.dp),
-                            elevated = true,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = stringResource(R.string.image_studio_prompt_label),
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    FilledTonalButton(
-                                        onClick = onEnhancePrompt,
-                                        enabled = studioState.prompt.isNotBlank() && !studioState.isEnhancingPrompt,
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.testTag("image_enhance_prompt_button")
-                                    ) {
-                                        if (studioState.isEnhancingPrompt) {
-                                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
-                                        } else {
-                                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(15.dp))
-                                        }
-                                        Spacer(Modifier.width(5.dp))
-                                        Text(
-                                            text = stringResource(R.string.image_studio_enhance_prompt),
-                                            style = MaterialTheme.typography.labelMedium
-                                        )
-                                    }
-                                }
-
-                                OutlinedTextField(
-                                    value = studioState.prompt,
-                                    onValueChange = onUpdatePrompt,
-                                    placeholder = { Text(stringResource(R.string.image_studio_prompt_placeholder)) },
-                                    minLines = 3,
-                                    maxLines = 6,
-                                    shape = RoundedCornerShape(14.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("image_prompt_input")
-                                )
-
-                                // Quick style booster chips
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    listOf(
-                                        "Photorealistic 8K" to "photorealistic, 8k uhd, sharp focus, 85mm lens, natural lighting",
-                                        "Cyberpunk" to "cyberpunk neon rain, volumetric fog, reflections, cinematic sci-fi",
-                                        "Anime" to "masterpiece anime key visual, cel shaded, vibrant lighting, ultra detailed",
-                                        "Dark Fantasy" to "dark fantasy oil painting, dramatic chiaroscuro, intricate armor, epic scale"
-                                    ).forEach { (chipLabel, suffix) ->
-                                        FilterChip(
-                                            selected = studioState.prompt.contains(suffix.take(14), ignoreCase = true),
-                                            onClick = {
-                                                val base = studioState.prompt.trim()
-                                                onUpdatePrompt(if (base.isEmpty()) suffix else "$base, $suffix")
-                                            },
-                                            label = { Text(chipLabel, style = MaterialTheme.typography.labelSmall) }
-                                        )
-                                    }
-                                }
-
-                                OutlinedTextField(
-                                    value = studioState.negativePrompt,
-                                    onValueChange = onUpdateNegativePrompt,
-                                    label = { Text(stringResource(R.string.image_studio_negative_label)) },
-                                    minLines = 1,
-                                    maxLines = 3,
-                                    shape = RoundedCornerShape(14.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("image_negative_prompt_input")
-                                )
-
-                                // Optional Img2Img reference photo
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        if (!studioState.initImagePath.isNullOrBlank()) {
-                                            AsyncImage(
-                                                model = File(studioState.initImagePath),
-                                                contentDescription = null,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier
-                                                    .size(40.dp)
-                                                    .clip(RoundedCornerShape(10.dp))
+                                            Text(
+                                                text = if (!upscaleSource.isNullOrBlank()) {
+                                                    File(upscaleSource).name
+                                                } else {
+                                                    stringResource(R.string.inpaint_pick_source_prompt)
+                                                },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
                                             )
-                                        }
-                                        Text(
-                                            text = stringResource(R.string.image_studio_img2img_title),
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        if (!studioState.initImagePath.isNullOrBlank()) {
-                                            OutlinedButton(
-                                                onClick = onClearReferencePhoto,
-                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                                shape = RoundedCornerShape(12.dp)
-                                            ) {
-                                                Text(stringResource(R.string.image_studio_clear_reference), style = MaterialTheme.typography.labelSmall)
-                                            }
                                         }
                                         OutlinedButton(
                                             onClick = {
@@ -958,46 +515,302 @@ fun ImageStudioScreen(
                                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                                 )
                                             },
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                             shape = RoundedCornerShape(12.dp),
-                                            modifier = Modifier.testTag("image_pick_ref_button")
+                                            modifier = Modifier.testTag("upscale_pick_photo_button")
                                         ) {
                                             Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(15.dp))
-                                            Spacer(Modifier.width(4.dp))
+                                            Spacer(Modifier.width(5.dp))
                                             Text(stringResource(R.string.image_studio_pick_reference), style = MaterialTheme.typography.labelSmall)
                                         }
                                     }
-                                }
 
-                                if (!studioState.initImagePath.isNullOrBlank()) {
-                                    Column {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text(
-                                                text = stringResource(R.string.image_studio_strength_label),
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            )
-                                            Text(
-                                                text = String.format(Locale.US, "%.2f", studioState.img2imgStrength),
-                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
-                                                color = MaterialTheme.colorScheme.primary
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        listOf(
+                                            UpscaleMethod.SMART_SHARP_2X to stringResource(R.string.upscale_method_sharp_2x),
+                                            UpscaleMethod.SMART_SHARP_4X to stringResource(R.string.upscale_method_sharp_4x),
+                                            UpscaleMethod.HIRES_DIFFUSION_2X to stringResource(R.string.upscale_method_hires_2x)
+                                        ).forEach { (method, label) ->
+                                            FilterChip(
+                                                selected = studioState.upscaleMethod == method,
+                                                onClick = { onUpdateUpscaleMethod(method) },
+                                                label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+                                                modifier = Modifier.testTag("upscale_method_${method.id}")
                                             )
                                         }
-                                        Slider(
-                                            value = studioState.img2imgStrength,
-                                            onValueChange = onUpdateStrength,
-                                            valueRange = 0.1f..0.95f
+                                    }
+
+                                    if (studioState.upscaleMethod.usesDiffusion) {
+                                        Column {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(
+                                                    text = stringResource(R.string.upscale_denoise_label),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = String.format(Locale.US, "%.2f", studioState.upscaleDenoise),
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                            Slider(
+                                                value = studioState.upscaleDenoise,
+                                                onValueChange = onUpdateUpscaleDenoise,
+                                                valueRange = 0.15f..0.70f
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    // Txt2Img / Img2Img / Inpaint Prompt & Canvas controls
+                                    if (studioState.pipelineMode == DiffusionPipelineMode.INPAINT) {
+                                        Text(
+                                            text = stringResource(R.string.image_studio_inpaint_hint),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    photoPicker.launch(
+                                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                                    )
+                                                },
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("inpaint_pick_photo_button")
+                                            ) {
+                                                Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(stringResource(R.string.image_studio_pick_reference))
+                                            }
+                                            if (!studioState.initImagePath.isNullOrBlank()) {
+                                                OutlinedButton(
+                                                    onClick = onClearReferencePhoto,
+                                                    shape = RoundedCornerShape(12.dp)
+                                                ) {
+                                                    Text(stringResource(R.string.image_studio_clear_reference))
+                                                }
+                                            }
+                                        }
+
+                                        if (!studioState.initImagePath.isNullOrBlank() && File(studioState.initImagePath).exists()) {
+                                            InpaintMaskCanvas(
+                                                imagePath = studioState.initImagePath,
+                                                strokes = studioState.maskStrokes,
+                                                invertMask = studioState.invertMask,
+                                                featherRadiusPx = studioState.maskFeatherPx,
+                                                onAddStroke = onAddMaskStroke,
+                                                onUndoStroke = onUndoMaskStroke,
+                                                onClearMask = onClearMask,
+                                                onToggleInvertMask = onToggleInvertMask,
+                                                onUpdateFeather = onUpdateMaskFeather
+                                            )
+                                        } else {
+                                            Surface(
+                                                shape = RoundedCornerShape(14.dp),
+                                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Text(
+                                                    text = stringResource(R.string.inpaint_pick_source_prompt),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.padding(14.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.image_studio_prompt_label),
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        FilledTonalButton(
+                                            onClick = onEnhancePrompt,
+                                            enabled = studioState.prompt.isNotBlank() && !studioState.isEnhancingPrompt,
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier.testTag("image_enhance_prompt_button")
+                                        ) {
+                                            if (studioState.isEnhancingPrompt) {
+                                                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
+                                            } else {
+                                                Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(15.dp))
+                                            }
+                                            Spacer(Modifier.width(5.dp))
+                                            Text(
+                                                text = stringResource(R.string.image_studio_enhance_prompt),
+                                                style = MaterialTheme.typography.labelMedium
+                                            )
+                                        }
+                                    }
+
+                                    OutlinedTextField(
+                                        value = studioState.prompt,
+                                        onValueChange = onUpdatePrompt,
+                                        placeholder = { Text(stringResource(R.string.image_studio_prompt_placeholder)) },
+                                        minLines = 3,
+                                        maxLines = 6,
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("image_prompt_input")
+                                    )
+
+                                    // Quick style booster chips
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        listOf(
+                                            "Photorealistic 8K" to "photorealistic, 8k uhd, sharp focus, 85mm lens, natural lighting",
+                                            "Cyberpunk" to "cyberpunk neon rain, volumetric fog, reflections, cinematic sci-fi",
+                                            "Anime" to "masterpiece anime key visual, cel shaded, vibrant lighting, ultra detailed",
+                                            "Dark Fantasy" to "dark fantasy oil painting, dramatic chiaroscuro, intricate armor, epic scale"
+                                        ).forEach { (chipLabel, suffix) ->
+                                            FilterChip(
+                                                selected = studioState.prompt.contains(suffix.take(14), ignoreCase = true),
+                                                onClick = {
+                                                    val base = studioState.prompt.trim()
+                                                    onUpdatePrompt(if (base.isEmpty()) suffix else "$base, $suffix")
+                                                },
+                                                label = { Text(chipLabel, style = MaterialTheme.typography.labelSmall) }
+                                            )
+                                        }
+                                    }
+
+                                    OutlinedTextField(
+                                        value = studioState.negativePrompt,
+                                        onValueChange = onUpdateNegativePrompt,
+                                        label = { Text(stringResource(R.string.image_studio_negative_label)) },
+                                        minLines = 1,
+                                        maxLines = 3,
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("image_negative_prompt_input")
+                                    )
+
+                                    // Negative prompt presets
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        LocalDreamCatalog.negativePresets.forEach { preset ->
+                                            FilterChip(
+                                                selected = studioState.negativePrompt.trim() == preset.prompt,
+                                                onClick = { onUpdateNegativePrompt(preset.prompt) },
+                                                label = { Text(preset.label, style = MaterialTheme.typography.labelSmall) }
+                                            )
+                                        }
+                                    }
+
+                                    // Img2Img reference photo controls
+                                    if (studioState.pipelineMode == DiffusionPipelineMode.IMG2IMG) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                if (!studioState.initImagePath.isNullOrBlank()) {
+                                                    AsyncImage(
+                                                        model = File(studioState.initImagePath),
+                                                        contentDescription = null,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .size(44.dp)
+                                                            .clip(RoundedCornerShape(10.dp))
+                                                    )
+                                                }
+                                                Text(
+                                                    text = stringResource(R.string.image_studio_img2img_title),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                if (!studioState.initImagePath.isNullOrBlank()) {
+                                                    OutlinedButton(
+                                                        onClick = onClearReferencePhoto,
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                        shape = RoundedCornerShape(12.dp)
+                                                    ) {
+                                                        Text(stringResource(R.string.image_studio_clear_reference), style = MaterialTheme.typography.labelSmall)
+                                                    }
+                                                }
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        photoPicker.launch(
+                                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                                        )
+                                                    },
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    modifier = Modifier.testTag("image_pick_ref_button")
+                                                ) {
+                                                    Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text(stringResource(R.string.image_studio_pick_reference), style = MaterialTheme.typography.labelSmall)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Denoising strength slider for Img2Img & Inpaint
+                                    if ((studioState.pipelineMode == DiffusionPipelineMode.IMG2IMG ||
+                                            studioState.pipelineMode == DiffusionPipelineMode.INPAINT) &&
+                                        !studioState.initImagePath.isNullOrBlank()
+                                    ) {
+                                        Column {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(
+                                                    text = stringResource(R.string.image_studio_strength_label),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = String.format(Locale.US, "%.2f", studioState.img2imgStrength),
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                            Slider(
+                                                value = studioState.img2imgStrength,
+                                                onValueChange = onUpdateStrength,
+                                                valueRange = 0.1f..0.95f
+                                            )
+                                        }
                                     }
                                 }
 
                                 if (!studioState.lastError.isNullOrBlank()) {
                                     Surface(
                                         shape = RoundedCornerShape(12.dp),
-                                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f),
+                                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f),
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
@@ -1009,6 +822,7 @@ fun ImageStudioScreen(
                                     }
                                 }
 
+                                // Primary Generate / Inpaint / Upscale / Stop Action Button
                                 if (studioState.isGenerating) {
                                     Button(
                                         onClick = onStopGenerate,
@@ -1027,19 +841,40 @@ fun ImageStudioScreen(
                                         Text(stringResource(R.string.action_stop))
                                     }
                                 } else {
+                                    val canRun = when (studioState.pipelineMode) {
+                                        DiffusionPipelineMode.UPSCALE ->
+                                            !studioState.initImagePath.isNullOrBlank() || activePreviewImage != null
+                                        else -> studioState.prompt.isNotBlank()
+                                    }
+                                    val buttonText = when (studioState.pipelineMode) {
+                                        DiffusionPipelineMode.UPSCALE -> stringResource(R.string.upscale_action_button)
+                                        DiffusionPipelineMode.INPAINT -> stringResource(R.string.image_studio_inpaint_generate)
+                                        else -> if (settings.imageBatchCount > 1) {
+                                            stringResource(R.string.image_studio_generate_batch, settings.imageBatchCount)
+                                        } else {
+                                            stringResource(R.string.image_studio_generate)
+                                        }
+                                    }
                                     Button(
                                         onClick = onGenerate,
-                                        enabled = studioState.prompt.isNotBlank(),
+                                        enabled = canRun,
                                         shape = RoundedCornerShape(16.dp),
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .height(50.dp)
                                             .testTag("image_generate_button")
                                     ) {
-                                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null)
+                                        Icon(
+                                            imageVector = when (studioState.pipelineMode) {
+                                                DiffusionPipelineMode.UPSCALE -> Icons.Rounded.Hd
+                                                DiffusionPipelineMode.INPAINT -> Icons.Rounded.Brush
+                                                else -> Icons.Rounded.AutoAwesome
+                                            },
+                                            contentDescription = null
+                                        )
                                         Spacer(Modifier.width(8.dp))
                                         Text(
-                                            text = stringResource(R.string.image_studio_generate),
+                                            text = buttonText,
                                             style = MaterialTheme.typography.titleSmall
                                         )
                                     }
@@ -1048,136 +883,45 @@ fun ImageStudioScreen(
                         }
                     }
 
-                    // 4. Diffusion Parameters Card (Resolution, Steps, CFG, Seed)
-                    item(key = "parameters_card") {
-                        LiquidGlassCard(
-                            shape = RoundedCornerShape(22.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Tune,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        text = stringResource(R.string.image_studio_resolution_label),
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
+                    // 4. Built-in Model Manager & Hardware Card
+                    item(key = "engine_checkpoint_card") {
+                        DiffusionModelManagerCard(
+                            settings = settings,
+                            studioState = studioState,
+                            hardwareInfo = hardwareInfo,
+                            diffusionModels = diffusionModels,
+                            onSelectMode = onSelectMode,
+                            onSelectBackend = onSelectBackend,
+                            onSelectLocalCheckpoint = onSelectLocalCheckpoint,
+                            onPickImportCheckpoint = { checkpointPicker.launch(arrayOf("*/*")) },
+                            onOpenDiffusionHub = onOpenDiffusionHub,
+                            onSearchModelPreset = onSearchModelPreset,
+                            onUpdateServerUrl = onUpdateServerUrl,
+                            onUpdateServerModel = onUpdateServerModel,
+                            onProbeServer = onProbeServer
+                        )
+                    }
 
-                                val sizes = listOf(
-                                    256 to 256,
-                                    384 to 384,
-                                    512 to 512,
-                                    512 to 768,
-                                    768 to 512,
-                                    768 to 768,
-                                    1024 to 1024
-                                )
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    sizes.forEach { (w, h) ->
-                                        FilterChip(
-                                            selected = settings.imageWidth == w && settings.imageHeight == h,
-                                            onClick = { onUpdateSize(w, h) },
-                                            label = {
-                                                Text(
-                                                    text = "${w}×${h}",
-                                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily)
-                                                )
-                                            }
-                                        )
-                                    }
-                                }
-
-                                // Steps slider
-                                Column {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = stringResource(R.string.image_studio_steps_label),
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Text(
-                                            text = "${settings.imageSteps}",
-                                            style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFontFamily),
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                    Slider(
-                                        value = settings.imageSteps.toFloat(),
-                                        onValueChange = { onUpdateSteps(it.roundToInt()) },
-                                        valueRange = 1f..50f
-                                    )
-                                }
-
-                                // CFG slider
-                                Column {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = stringResource(R.string.image_studio_cfg_label),
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Text(
-                                            text = String.format(Locale.US, "%.1f", settings.imageCfgScale),
-                                            style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFontFamily),
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                    Slider(
-                                        value = settings.imageCfgScale,
-                                        onValueChange = { onUpdateCfgScale((it * 2f).roundToInt() / 2f) },
-                                        valueRange = 1.0f..15.0f
-                                    )
-                                }
-
-                                // Seed field + random dice
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    OutlinedTextField(
-                                        value = studioState.seedInput,
-                                        onValueChange = onUpdateSeed,
-                                        label = { Text(stringResource(R.string.image_studio_seed_label)) },
-                                        singleLine = true,
-                                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    FilledTonalButton(
-                                        onClick = { onUpdateSeed(Random.nextLong(1L, 999_999_999L).toString()) },
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier.height(54.dp)
-                                    ) {
-                                        Icon(Icons.Rounded.Casino, contentDescription = null)
-                                    }
-                                }
-                            }
+                    // 5. Full Local Dream Parameters Card (Resolution, Scheduler, Batch, CLIP Skip, HiRes Fix, Steps, CFG, Seed Lock)
+                    if (studioState.pipelineMode != DiffusionPipelineMode.UPSCALE) {
+                        item(key = "parameters_card") {
+                            DiffusionParametersCard(
+                                settings = settings,
+                                studioState = studioState,
+                                onUpdateSize = onUpdateSize,
+                                onUpdateScheduler = onUpdateScheduler,
+                                onUpdateSteps = onUpdateSteps,
+                                onUpdateCfgScale = onUpdateCfgScale,
+                                onUpdateClipSkip = onUpdateClipSkip,
+                                onUpdateBatchCount = onUpdateBatchCount,
+                                onUpdateHiResFix = onUpdateHiResFix,
+                                onUpdateSeed = onUpdateSeed,
+                                onToggleSeedLock = onToggleSeedLock
+                            )
                         }
                     }
 
-                    // 5. Local Generated Images Gallery
+                    // 6. Local Generated Images Gallery
                     item(key = "gallery_section") {
                         LiquidGlassCard(
                             shape = RoundedCornerShape(22.dp),
@@ -1252,118 +996,21 @@ fun ImageStudioScreen(
         }
     }
 
-    // Full-screen Image Inspection Lightbox
+    // Full-screen Image Inspection Lightbox with Upscale / Img2Img / Inpaint / Chat actions
     inspectedImage?.let { image ->
-        Dialog(
-            onDismissRequest = { inspectedImage = null },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier
-                    .fillMaxWidth(0.94f)
-                    .widthIn(max = 640.dp)
-                    .padding(vertical = 20.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = image.modelName.ifBlank { image.engineLabel },
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(onClick = { inspectedImage = null }) {
-                            Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.action_cancel))
-                        }
-                    }
-
-                    AsyncImage(
-                        model = File(image.localPath),
-                        contentDescription = image.prompt,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(340.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                    )
-
-                    Text(
-                        text = image.prompt,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-
-                    Text(
-                        text = "${image.width}×${image.height} · ${image.steps} steps · CFG ${image.cfgScale} · Seed ${image.seed} · ${image.engineLabel}",
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Button(
-                            onClick = { onSaveToGallery(image) },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.image_studio_save_gallery))
-                        }
-                        FilledTonalButton(
-                            onClick = {
-                                onSendToChat(image)
-                                inspectedImage = null
-                                onNavigateBack()
-                            },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.image_studio_send_chat))
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                onReuseSettings(image)
-                                inspectedImage = null
-                            },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Rounded.Replay, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.image_studio_reuse_settings))
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                onDeleteImage(image)
-                                inspectedImage = null
-                            },
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.action_delete))
-                        }
-                    }
-                }
-            }
-        }
+        GeneratedImageLightbox(
+            image = image,
+            onDismiss = { inspectedImage = null },
+            onSaveToGallery = onSaveToGallery,
+            onUpscale2x = onQuickUpscaleImage,
+            onSendToImg2Img = onSendToImg2Img,
+            onSendToInpaint = onSendToInpaint,
+            onSendToChat = {
+                onSendToChat(it)
+                onNavigateBack()
+            },
+            onReuseSettings = onReuseSettings,
+            onDeleteImage = onDeleteImage
+        )
     }
 }

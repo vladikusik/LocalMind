@@ -246,6 +246,13 @@ class HuggingFaceClient(private val context: Context) {
                     throw IOException(hint)
                 }
 
+                val contentType = response.header("Content-Type").orEmpty().lowercase()
+                if (contentType.startsWith("text/html")) {
+                    throw IOException(
+                        "Hugging Face returned a web page instead of the model file (gated or requires token). Add your HF token in Model Hub."
+                    )
+                }
+
                 val body = response.body ?: throw IOException("Empty download body")
                 val totalBytes = body.contentLength().takeIf { it > 0L } ?: modelFile.sizeBytes
                 val buffer = ByteArray(64 * 1024)

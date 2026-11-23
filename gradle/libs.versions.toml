@@ -43,6 +43,8 @@ googleid = "1.1.1"
 mediapipeTasksGenai = "0.10.24"
 llamatik = "1.10.1"
 litertlm = "0.19.1"
+litertNpuQualcomm = "2.3.0"
+qnnRuntime = "2.51.0"
 
 
 [libraries]
@@ -100,6 +102,8 @@ googleid = { group = "com.google.android.libraries.identity.googleid", name = "g
 mediapipe-tasks-genai = { group = "com.google.mediapipe", name = "tasks-genai", version.ref = "mediapipeTasksGenai" }
 llamatik-library = { group = "com.llamatik", name = "library", version.ref = "llamatik" }
 litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
+litert-npu-qualcomm = { group = "com.google.ai.edge.litert", name = "litert-npu-runtime-qualcomm", version.ref = "litertNpuQualcomm" }
+qualcomm-qnn-runtime = { group = "com.qualcomm.qti", name = "qnn-runtime", version.ref = "qnnRuntime" }
 
 
 [plugins]

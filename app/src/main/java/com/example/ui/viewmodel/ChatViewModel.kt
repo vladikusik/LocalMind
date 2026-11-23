@@ -11,13 +11,18 @@ import com.example.data.huggingface.HfRepoSummary
 import com.example.data.huggingface.HuggingFaceClient
 import com.example.data.huggingface.ModelDownloadProgress
 import com.example.BuildConfig
+import com.example.data.imagegen.DiffusionPipelineMode
+import com.example.data.imagegen.DiffusionScheduler
 import com.example.data.imagegen.GeneratedImageEntity
 import com.example.data.imagegen.ImageGenBackendMode
 import com.example.data.imagegen.ImageGenRequest
 import com.example.data.imagegen.ImageStudioStateHolder
 import com.example.data.imagegen.ImageStudioUiState
+import com.example.data.imagegen.ImageUpscaleRequest
 import com.example.data.imagegen.LocalDreamCatalog
 import com.example.data.imagegen.LocalImageGenerator
+import com.example.data.imagegen.MaskStroke
+import com.example.data.imagegen.UpscaleMethod
 import com.example.data.updates.GitHubUpdateManager
 import com.example.data.updates.UpdateCheckState
 import com.example.data.local.AppDatabase
@@ -675,6 +680,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         executeHfSearch(query = q, authorFilter = null)
     }
 
+    fun searchHuggingFaceQuery(query: String) {
+        val clean = query.trim()
+        _modelHubState.update { it.copy(searchQuery = clean, selectedPreset = "custom") }
+        executeHfSearch(query = clean, authorFilter = null)
+    }
+
     private fun executeHfSearch(query: String, authorFilter: String?) {
         viewModelScope.launch {
             _modelHubState.update { it.copy(isSearching = true, searchError = null) }
@@ -786,14 +797,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     downloadedAt = System.currentTimeMillis()
                                 )
                                 chatRepository.saveDownloadedModel(entity)
-                                val isImageWeight = LocalDreamCatalog.isImageModelFormat(entity.format)
+                                val isImageWeight = LocalDreamCatalog.isImageModelFormat(entity.format) ||
+                                    (entity.format.equals("gguf", ignoreCase = true) && isLikelyDiffusionName(entity.fileName))
                                 if (isImageWeight) {
                                     settingsRepository.updateActiveImageModelId(entity.id)
-                                    if (LocalDreamCatalog.isLocalDreamFormat(entity.format)) {
-                                        settingsRepository.updateImageGenMode(ImageGenBackendMode.LOCAL_DREAM_NPU)
-                                    }
+                                    settingsRepository.updateImageGenMode(ImageGenBackendMode.ON_DEVICE_SD_CPP)
                                     _modelHubState.update {
-                                        it.copy(statusMessage = "Downloaded image model ${modelFile.fileName} (ready in Image Studio)")
+                                        it.copy(statusMessage = "Downloaded image model ${modelFile.fileName} (ready in On-Device Studio)")
                                     }
                                 } else {
                                     settingsRepository.updateActiveLocalModelId(entity.id)
@@ -832,12 +842,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun activateDownloadedModel(model: DownloadedModelEntity) {
         viewModelScope.launch {
-            if (LocalDreamCatalog.isImageModelFormat(model.format)) {
+            if (LocalDreamCatalog.isImageModelFormat(model.format) ||
+                (model.format.equals("gguf", ignoreCase = true) && isLikelyDiffusionName(model.fileName))
+            ) {
                 settingsRepository.updateActiveImageModelId(model.id)
-                if (LocalDreamCatalog.isLocalDreamFormat(model.format)) {
-                    settingsRepository.updateImageGenMode(ImageGenBackendMode.LOCAL_DREAM_NPU)
-                }
-                _uiNotice.value = "Selected ${model.displayName} for Image Studio"
+                settingsRepository.updateImageGenMode(ImageGenBackendMode.ON_DEVICE_SD_CPP)
+                _uiNotice.value = "Selected ${model.displayName} for On-Device Image Studio"
                 return@launch
             }
             settingsRepository.updateActiveLocalModelId(model.id)
@@ -866,13 +876,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val result = chatRepository.importLocalModel(getApplication<Application>().contentResolver, uri)
             result.fold(
                 onSuccess = { entity ->
-                    if (LocalDreamCatalog.isImageModelFormat(entity.format)) {
+                    if (LocalDreamCatalog.isImageModelFormat(entity.format) ||
+                        (entity.format.equals("gguf", ignoreCase = true) && isLikelyDiffusionName(entity.fileName))
+                    ) {
                         settingsRepository.updateActiveImageModelId(entity.id)
-                        if (LocalDreamCatalog.isLocalDreamFormat(entity.format)) {
-                            settingsRepository.updateImageGenMode(ImageGenBackendMode.LOCAL_DREAM_NPU)
-                        }
+                        settingsRepository.updateImageGenMode(ImageGenBackendMode.ON_DEVICE_SD_CPP)
                         _modelHubState.update { it.copy(statusMessage = "Imported image model ${entity.fileName}") }
-                        _uiNotice.value = "Imported ${entity.fileName} for Image Studio"
+                        _uiNotice.value = "Imported ${entity.fileName} for On-Device Image Studio"
                     } else {
                         settingsRepository.updateActiveLocalModelId(entity.id)
                         settingsRepository.updateActiveProvider(ApiProvider.ON_DEVICE)
@@ -1315,14 +1325,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- Local Uncensored Image Generation Studio ---
+    // --- Built-in On-Device Image Studio (Local Dream Feature Set) ---
 
     fun updateImageGenMode(mode: ImageGenBackendMode) {
         viewModelScope.launch { settingsRepository.updateImageGenMode(mode) }
     }
 
-    fun updateLocalDreamUrl(url: String) {
-        viewModelScope.launch { settingsRepository.updateLocalDreamUrl(url) }
+    fun selectDiffusionPipeline(mode: DiffusionPipelineMode) {
+        imageStudioHolder.update { it.copy(pipelineMode = mode, lastError = null) }
     }
 
     fun updateImageServerUrl(url: String) {
@@ -1353,6 +1363,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { settingsRepository.updateImageCfgScale(cfg) }
     }
 
+    fun updateImageScheduler(scheduler: DiffusionScheduler) {
+        viewModelScope.launch {
+            settingsRepository.updateImageScheduler(scheduler)
+            if (scheduler == DiffusionScheduler.LCM_TURBO) {
+                settingsRepository.updateImageSteps(scheduler.recommendedSteps)
+                settingsRepository.updateImageCfgScale(scheduler.recommendedCfg)
+            }
+        }
+    }
+
+    fun updateImageClipSkip(clipSkip: Int) {
+        viewModelScope.launch { settingsRepository.updateImageClipSkip(clipSkip) }
+    }
+
+    fun updateImageBatchCount(count: Int) {
+        viewModelScope.launch { settingsRepository.updateImageBatchCount(count) }
+    }
+
+    fun updateImageHiResFix(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.updateImageHiResFix(enabled) }
+    }
+
     fun updateImagePrompt(prompt: String) {
         imageStudioHolder.update { it.copy(prompt = prompt) }
     }
@@ -1365,8 +1397,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         imageStudioHolder.update { it.copy(seedInput = seedText.filter { c -> c.isDigit() || c == '-' }.take(12)) }
     }
 
+    fun toggleImageSeedLocked() {
+        imageStudioHolder.update { it.copy(seedLocked = !it.seedLocked) }
+    }
+
     fun updateImg2ImgStrength(strength: Float) {
         imageStudioHolder.update { it.copy(img2imgStrength = strength.coerceIn(0.05f, 0.99f)) }
+    }
+
+    fun addInpaintMaskStroke(stroke: MaskStroke) {
+        imageStudioHolder.update { it.copy(maskStrokes = it.maskStrokes + stroke, lastError = null) }
+    }
+
+    fun undoInpaintMaskStroke() {
+        imageStudioHolder.update {
+            if (it.maskStrokes.isEmpty()) it else it.copy(maskStrokes = it.maskStrokes.dropLast(1))
+        }
+    }
+
+    fun clearInpaintMask() {
+        imageStudioHolder.update { it.copy(maskStrokes = emptyList(), invertMask = false) }
+    }
+
+    fun toggleInpaintInvertMask() {
+        imageStudioHolder.update { it.copy(invertMask = !it.invertMask) }
+    }
+
+    fun updateInpaintFeather(px: Int) {
+        imageStudioHolder.update { it.copy(maskFeatherPx = px.coerceIn(0, 24)) }
+    }
+
+    fun updateUpscaleMethod(method: UpscaleMethod) {
+        imageStudioHolder.update { it.copy(upscaleMethod = method) }
+    }
+
+    fun updateUpscaleDenoise(denoise: Float) {
+        imageStudioHolder.update { it.copy(upscaleDenoise = denoise.coerceIn(0.15f, 0.70f)) }
     }
 
     fun clearImageStudioError() {
@@ -1382,7 +1448,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val res = localImageGenerator.importReferencePhoto(uri)
             res.fold(
                 onSuccess = { path ->
-                    imageStudioHolder.update { it.copy(initImagePath = path, lastError = null) }
+                    imageStudioHolder.update {
+                        it.copy(
+                            initImagePath = path,
+                            maskStrokes = emptyList(),
+                            lastError = null
+                        )
+                    }
                 },
                 onFailure = { err ->
                     imageStudioHolder.update { it.copy(lastError = err.localizedMessage ?: "Failed to load reference photo") }
@@ -1392,17 +1464,63 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearImg2ImgReference() {
-        imageStudioHolder.update { it.copy(initImagePath = null) }
+        imageStudioHolder.update { it.copy(initImagePath = null, maskStrokes = emptyList()) }
+    }
+
+    fun sendGeneratedImageToImg2Img(image: GeneratedImageEntity) {
+        if (!File(image.localPath).exists()) {
+            _uiNotice.value = "Image file not found on disk."
+            return
+        }
+        imageStudioHolder.update {
+            it.copy(
+                pipelineMode = DiffusionPipelineMode.IMG2IMG,
+                initImagePath = image.localPath,
+                maskStrokes = emptyList(),
+                prompt = it.prompt.ifBlank { image.prompt },
+                lastError = null
+            )
+        }
+        _uiNotice.value = "Loaded into Img2Img"
+    }
+
+    fun sendGeneratedImageToInpaint(image: GeneratedImageEntity) {
+        if (!File(image.localPath).exists()) {
+            _uiNotice.value = "Image file not found on disk."
+            return
+        }
+        imageStudioHolder.update {
+            it.copy(
+                pipelineMode = DiffusionPipelineMode.INPAINT,
+                initImagePath = image.localPath,
+                maskStrokes = emptyList(),
+                invertMask = false,
+                prompt = it.prompt.ifBlank { image.prompt },
+                lastError = null
+            )
+        }
+        _uiNotice.value = "Loaded into Inpaint mask canvas"
+    }
+
+    fun sendGeneratedImageToUpscale(image: GeneratedImageEntity) {
+        if (!File(image.localPath).exists()) {
+            _uiNotice.value = "Image file not found on disk."
+            return
+        }
+        imageStudioHolder.update {
+            it.copy(
+                pipelineMode = DiffusionPipelineMode.UPSCALE,
+                initImagePath = image.localPath,
+                lastError = null
+            )
+        }
+        _uiNotice.value = "Loaded into Upscaler"
     }
 
     fun probeImageServer() {
         val current = settings.value
         if (current.imageGenMode == ImageGenBackendMode.ON_DEVICE_SD_CPP) return
-        val targetUrl = if (current.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
-            current.localDreamUrl
-        } else {
-            current.imageServerUrl
-        }
+        val targetUrl = current.imageServerUrl
         viewModelScope.launch {
             imageStudioHolder.update { it.copy(isProbingServer = true, serverStatus = null) }
             val result = localImageGenerator.probeServerModels(
@@ -1412,21 +1530,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             result.fold(
                 onSuccess = { models ->
-                    val statusLabel = if (current.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
-                        "Local Dream online ($targetUrl) · ${models.firstOrNull() ?: "Ready"}"
-                    } else {
-                        "Connected · ${models.size} checkpoint(s) found"
-                    }
                     imageStudioHolder.update {
                         it.copy(
                             isProbingServer = false,
                             serverModels = models,
-                            serverStatus = statusLabel
+                            serverStatus = "Connected · ${models.size} checkpoint(s) found"
                         )
                     }
-                    if (current.imageServerModel.isBlank() && models.isNotEmpty() &&
-                        current.imageGenMode != ImageGenBackendMode.LOCAL_DREAM_NPU
-                    ) {
+                    if (current.imageServerModel.isBlank() && models.isNotEmpty()) {
                         settingsRepository.updateImageServerModel(models.first())
                     }
                 },
@@ -1445,34 +1556,153 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun stopImageGeneration() {
         imageGenJob?.cancel()
         imageGenJob = null
-        if (settings.value.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
-            viewModelScope.launch {
-                localImageGenerator.stopLocalDreamServer(settings.value.localDreamUrl)
+        imageStudioHolder.update { it.copy(isGenerating = false, progressLabel = null) }
+    }
+
+    fun upscaleImageNow(
+        sourcePathOverride: String? = null,
+        methodOverride: UpscaleMethod? = null
+    ) {
+        val ui = imageStudioHolder.state.value
+        if (ui.isGenerating) return
+        val sourcePath = sourcePathOverride
+            ?: ui.initImagePath
+            ?: generatedImages.value.firstOrNull { it.id == ui.selectedGalleryImageId }?.localPath
+            ?: generatedImages.value.firstOrNull()?.localPath
+
+        if (sourcePath.isNullOrBlank() || !File(sourcePath).exists()) {
+            imageStudioHolder.update { it.copy(lastError = "Pick a photo or generate an image to upscale first.") }
+            return
+        }
+
+        val method = methodOverride ?: ui.upscaleMethod
+        imageGenJob?.cancel()
+        imageGenJob = viewModelScope.launch {
+            val currentSettings = settings.value
+            val selectedDiffusion = resolveActiveDiffusionModel(currentSettings)
+            imageStudioHolder.update {
+                it.copy(
+                    isGenerating = true,
+                    lastError = null,
+                    progressLabel = "Starting ${method.scaleFactor}× on-device upscaler…"
+                )
+            }
+            try {
+                val res = localImageGenerator.upscaleImage(
+                    ImageUpscaleRequest(
+                        sourceImagePath = sourcePath,
+                        method = method,
+                        prompt = ui.prompt.trim(),
+                        negativePrompt = ui.negativePrompt.trim(),
+                        denoiseStrength = ui.upscaleDenoise,
+                        steps = currentSettings.imageSteps.coerceAtMost(20),
+                        cfgScale = currentSettings.imageCfgScale,
+                        seed = ui.seedInput.trim().toLongOrNull() ?: -1L,
+                        localModelPath = selectedDiffusion?.localPath,
+                        localModelName = selectedDiffusion?.displayName.orEmpty(),
+                        hardwareBackend = currentSettings.localBackend,
+                        threads = currentSettings.localThreads
+                    )
+                ) { status ->
+                    imageStudioHolder.update { it.copy(progressLabel = status) }
+                }
+
+                res.fold(
+                    onSuccess = { out ->
+                        val entity = GeneratedImageEntity(
+                            prompt = ui.prompt.trim().ifBlank { "Upscaled ${method.scaleFactor}×" },
+                            negativePrompt = ui.negativePrompt.trim(),
+                            localPath = out.file.absolutePath,
+                            width = out.width,
+                            height = out.height,
+                            steps = if (method.usesDiffusion) currentSettings.imageSteps.coerceAtMost(20) else 0,
+                            cfgScale = currentSettings.imageCfgScale,
+                            seed = out.seed,
+                            engineLabel = out.engineLabel,
+                            modelName = out.modelName,
+                            durationMs = out.durationMs,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        val newId = chatRepository.saveGeneratedImage(entity)
+                        imageStudioHolder.update {
+                            it.copy(
+                                isGenerating = false,
+                                progressLabel = null,
+                                lastError = null,
+                                selectedGalleryImageId = newId
+                            )
+                        }
+                        _uiNotice.value = "Upscaled to ${out.width}×${out.height} (${out.durationMs / 1000.0}s)"
+                    },
+                    onFailure = { err ->
+                        imageStudioHolder.update {
+                            it.copy(
+                                isGenerating = false,
+                                progressLabel = null,
+                                lastError = err.localizedMessage ?: "Upscaling failed."
+                            )
+                        }
+                    }
+                )
+            } catch (ce: CancellationException) {
+                imageStudioHolder.update { it.copy(isGenerating = false, progressLabel = null) }
+                throw ce
             }
         }
-        imageStudioHolder.update { it.copy(isGenerating = false, progressLabel = null) }
     }
 
     fun generateLocalImage() {
         val ui = imageStudioHolder.state.value
+        if (ui.isGenerating) return
+
+        if (ui.pipelineMode == DiffusionPipelineMode.UPSCALE) {
+            upscaleImageNow()
+            return
+        }
+
         val prompt = ui.prompt.trim()
-        if (prompt.isEmpty() || ui.isGenerating) return
+        if (prompt.isEmpty()) return
+
+        val batchCount = settings.value.imageBatchCount.coerceIn(1, 4)
+        val parsedSeed = ui.seedInput.trim().toLongOrNull() ?: -1L
+        val baseSeed = if (parsedSeed >= 0L) {
+            parsedSeed
+        } else {
+            kotlin.random.Random.nextLong(1L, 2_147_483_647L)
+        }
 
         imageGenJob?.cancel()
         imageGenJob = viewModelScope.launch {
-            executeLocalImageGeneration(
-                prompt = prompt,
-                negativePrompt = ui.negativePrompt.trim(),
-                seedOverride = ui.seedInput.trim().toLongOrNull() ?: -1L,
-                initImagePath = ui.initImagePath,
-                strength = ui.img2imgStrength
-            )
+            for (index in 0 until batchCount) {
+                val iterSeed = if (index == 0) baseSeed else baseSeed + index
+                val batchPrefix = if (batchCount > 1) "[${index + 1}/$batchCount] " else ""
+                val result = executeLocalImageGeneration(
+                    prompt = prompt,
+                    negativePrompt = ui.negativePrompt.trim(),
+                    seedOverride = iterSeed,
+                    pipelineMode = ui.pipelineMode,
+                    initImagePath = ui.initImagePath,
+                    strength = ui.img2imgStrength,
+                    maskStrokes = ui.maskStrokes,
+                    invertMask = ui.invertMask,
+                    maskFeatherPx = ui.maskFeatherPx,
+                    statusPrefix = batchPrefix,
+                    keepBusyAfterSuccess = index < batchCount - 1
+                )
+                if (result.isFailure) break
+                val saved = result.getOrNull()
+                if (saved != null && ui.seedLocked && index == 0) {
+                    imageStudioHolder.update { it.copy(seedInput = saved.seed.toString()) }
+                }
+            }
+            imageStudioHolder.update { it.copy(isGenerating = false, progressLabel = null) }
         }
     }
 
     private suspend fun generateImageFromAgentTool(prompt: String, negativePrompt: String): String {
         imageStudioHolder.update {
             it.copy(
+                pipelineMode = DiffusionPipelineMode.TXT2IMG,
                 prompt = prompt,
                 negativePrompt = negativePrompt.ifBlank { it.negativePrompt }
             )
@@ -1481,8 +1711,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             prompt = prompt,
             negativePrompt = negativePrompt.ifBlank { imageStudioHolder.state.value.negativePrompt },
             seedOverride = -1L,
+            pipelineMode = DiffusionPipelineMode.TXT2IMG,
             initImagePath = null,
-            strength = 0.65f
+            strength = 0.65f,
+            maskStrokes = emptyList(),
+            invertMask = false,
+            maskFeatherPx = 6
         )
         return res.fold(
             onSuccess = { entity ->
@@ -1494,38 +1728,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    private suspend fun executeLocalImageGeneration(
-        prompt: String,
-        negativePrompt: String,
-        seedOverride: Long,
-        initImagePath: String?,
-        strength: Float
-    ): Result<GeneratedImageEntity> {
-        val currentSettings = settings.value
+    private fun resolveActiveDiffusionModel(currentSettings: AppSettings): DownloadedModelEntity? {
         val allDownloaded = downloadedModels.value.filter { File(it.localPath).exists() }
         val diffusionCandidates = allDownloaded.filter {
             val ext = it.format.lowercase()
             LocalDreamCatalog.isImageModelFormat(ext) || (ext == "gguf" && isLikelyDiffusionName(it.fileName))
         }
-        val selectedDiffusion = allDownloaded.firstOrNull { it.id == currentSettings.activeImageModelId }
+        return allDownloaded.firstOrNull { it.id == currentSettings.activeImageModelId }
+            ?: diffusionCandidates.firstOrNull { LocalDreamCatalog.isNativeOnDeviceDiffusionFormat(it.format) }
             ?: diffusionCandidates.firstOrNull()
+    }
+
+    private suspend fun executeLocalImageGeneration(
+        prompt: String,
+        negativePrompt: String,
+        seedOverride: Long,
+        pipelineMode: DiffusionPipelineMode,
+        initImagePath: String?,
+        strength: Float,
+        maskStrokes: List<MaskStroke>,
+        invertMask: Boolean,
+        maskFeatherPx: Int,
+        statusPrefix: String = "",
+        keepBusyAfterSuccess: Boolean = false
+    ): Result<GeneratedImageEntity> {
+        val currentSettings = settings.value
+        val selectedDiffusion = resolveActiveDiffusionModel(currentSettings)
 
         imageStudioHolder.update {
             it.copy(
                 isGenerating = true,
                 lastError = null,
-                progressLabel = "Preparing local diffusion pipeline…"
+                progressLabel = "${statusPrefix}Preparing on-device diffusion pipeline…"
             )
         }
 
         return try {
-            val effectiveServerUrl = if (currentSettings.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
-                currentSettings.localDreamUrl
-            } else {
-                currentSettings.imageServerUrl
-            }
             val req = ImageGenRequest(
                 mode = currentSettings.imageGenMode,
+                pipelineMode = pipelineMode,
                 prompt = prompt,
                 negativePrompt = negativePrompt,
                 width = currentSettings.imageWidth,
@@ -1533,19 +1774,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 steps = currentSettings.imageSteps,
                 cfgScale = currentSettings.imageCfgScale,
                 seed = seedOverride,
+                scheduler = currentSettings.imageScheduler,
+                clipSkip = currentSettings.imageClipSkip,
+                hiResFix = currentSettings.imageHiResFix,
                 localModelPath = selectedDiffusion?.localPath,
                 localModelName = selectedDiffusion?.displayName.orEmpty(),
-                serverUrl = effectiveServerUrl,
+                serverUrl = currentSettings.imageServerUrl,
                 serverApiKey = currentSettings.imageServerApiKey,
                 serverModel = currentSettings.imageServerModel,
                 hardwareBackend = currentSettings.localBackend,
                 threads = currentSettings.localThreads,
                 initImagePath = initImagePath,
-                img2imgStrength = strength
+                img2imgStrength = strength,
+                maskStrokes = maskStrokes,
+                invertMask = invertMask,
+                maskFeatherPx = maskFeatherPx
             )
 
             val genResult = localImageGenerator.generate(req) { status ->
-                imageStudioHolder.update { it.copy(progressLabel = status) }
+                imageStudioHolder.update { it.copy(progressLabel = "$statusPrefix$status") }
             }
 
             genResult.fold(
@@ -1568,8 +1815,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     val saved = entity.copy(id = newId)
                     imageStudioHolder.update {
                         it.copy(
-                            isGenerating = false,
-                            progressLabel = null,
+                            isGenerating = keepBusyAfterSuccess,
+                            progressLabel = if (keepBusyAfterSuccess) it.progressLabel else null,
                             lastError = null,
                             selectedGalleryImageId = newId
                         )
