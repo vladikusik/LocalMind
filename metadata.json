@@ -1,0 +1,6 @@
+{
+  "name": "LocalMind",
+  "description": "Local LLM chat workspace powered by LM Studio with streaming markdown, Room history, voice input, and theme switching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

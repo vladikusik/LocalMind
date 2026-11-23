@@ -1,0 +1,268 @@
+<resources>
+    <string name="app_name">LocalMind</string>
+    <string name="studio_tagline">Universal AI &amp; Local LLM</string>
+
+    <!-- Navigation & Drawer -->
+    <string name="action_open_drawer">Open conversation history</string>
+    <string name="action_new_chat">New chat</string>
+    <string name="action_settings">APIs &amp; Settings</string>
+    <string name="action_model_hub">Hugging Face Models</string>
+    <string name="action_agents_mcp">Agents &amp; MCP</string>
+    <string name="action_back">Back</string>
+    <string name="search_chats_placeholder">Search conversations…</string>
+    <string name="drawer_section_pinned">Pinned</string>
+    <string name="drawer_section_recent">Recent</string>
+    <string name="drawer_empty_title">No saved chats yet</string>
+    <string name="drawer_empty_subtitle">Your conversations are stored privately in local Room storage.</string>
+    <string name="drawer_no_search_results">No matching conversations</string>
+    <string name="drawer_theme_label">Appearance</string>
+
+    <!-- Conversation Menu -->
+    <string name="action_more_options">More options</string>
+    <string name="action_rename">Rename</string>
+    <string name="action_pin">Pin chat</string>
+    <string name="action_unpin">Unpin chat</string>
+    <string name="action_export_markdown">Export Markdown</string>
+    <string name="action_delete">Delete</string>
+    <string name="dialog_rename_title">Rename conversation</string>
+    <string name="dialog_rename_hint">Conversation title</string>
+    <string name="dialog_delete_title">Delete conversation?</string>
+    <string name="dialog_delete_message">This permanently removes the chat and all its messages from local storage.</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_save">Save</string>
+    <string name="action_confirm_delete">Delete</string>
+
+    <!-- Connection & Models -->
+    <string name="status_connected">Connected</string>
+    <string name="status_checking">Checking…</string>
+    <string name="status_offline">Offline</string>
+    <string name="status_on_device_ready">On-Device Ready</string>
+    <string name="model_auto_detect">Select Model</string>
+    <string name="model_picker_title">Provider &amp; Model</string>
+    <string name="model_picker_refresh">Refresh models</string>
+    <string name="model_picker_empty">No models loaded yet. Check your server URL, API key, or download an on-device Hugging Face model.</string>
+    <string name="provider_section_free">Free Cloud Models</string>
+    <string name="provider_section_local">Local &amp; On-Device</string>
+    <string name="provider_section_cloud">Cloud APIs</string>
+
+    <!-- Empty Welcome State -->
+    <string name="welcome_title">Local models &amp; every AI API.</string>
+    <string name="welcome_subtitle">Run Hugging Face models right on your phone, connect to LM Studio / Ollama, or switch to OpenAI, Claude, Gemini, DeepSeek, Groq &amp; OpenRouter.</string>
+    <string name="welcome_configure_server">Configure APIs</string>
+    <string name="welcome_download_models">Hugging Face Hub</string>
+    <string name="prompt_chip_code_title">Write Kotlin code</string>
+    <string name="prompt_chip_code_body">Write a clean Kotlin Coroutines example with Flow debounce and error handling.</string>
+    <string name="prompt_chip_explain_title">Compare concepts</string>
+    <string name="prompt_chip_explain_body">Create a concise Markdown table comparing REST, GraphQL, and gRPC.</string>
+    <string name="prompt_chip_debug_title">Architecture advice</string>
+    <string name="prompt_chip_debug_body">Outline best practices for structuring a scalable offline-first mobile app.</string>
+    <string name="prompt_chip_write_title">Polish writing</string>
+    <string name="prompt_chip_write_body">Help me draft a clear, concise project status update for my engineering team.</string>
+
+    <!-- Chat Composer & Messages -->
+    <string name="composer_placeholder">Message AI model…</string>
+    <string name="composer_listening">Listening… speak now</string>
+    <string name="action_send">Send message</string>
+    <string name="action_stop">Stop generation</string>
+    <string name="action_voice_start">Start voice input</string>
+    <string name="action_voice_stop">Stop voice input</string>
+    <string name="action_copy">Copy</string>
+    <string name="action_copied">Copied</string>
+    <string name="action_regenerate">Regenerate</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_share">Share</string>
+    <string name="action_copy_code">Copy code</string>
+    <string name="thinking_section_label">Thought process</string>
+    <string name="thinking_in_progress">Thinking…</string>
+    <string name="generating_placeholder">Generating…</string>
+    <string name="role_user">You</string>
+    <string name="role_assistant">Assistant</string>
+    <string name="voice_permission_denied">Microphone permission is needed for voice input.</string>
+    <string name="voice_unavailable">Speech recognition service is not available on this device.</string>
+    <string name="action_attach">Attach photo or file</string>
+    <string name="action_attach_photo">Photo</string>
+    <string name="action_attach_file">Document / File</string>
+    <string name="action_remove_attachment">Remove attachment</string>
+    <string name="action_scroll_to_bottom">Scroll to latest</string>
+
+    <!-- Hugging Face Model Hub Screen -->
+    <string name="hub_title">Hugging Face Model Hub</string>
+    <string name="hub_downloaded_section">Downloaded On-Device Models</string>
+    <string name="hub_no_downloaded">No models downloaded yet. Download any GGUF (llama.cpp), .litertlm (LiteRT-LM), or .task (MediaPipe) model below to run 100% offline.</string>
+    <string name="hub_import_local">Import file</string>
+    <string name="hub_use_model">Use</string>
+    <string name="hub_active_badge">Active</string>
+    <string name="hub_on_device_badge">On-Device</string>
+    <string name="hub_desktop_gguf_badge">GGUF</string>
+    <string name="hub_badge_llama_cpp">llama.cpp · GGUF</string>
+    <string name="hub_badge_litert_lm">LiteRT-LM</string>
+    <string name="hub_badge_mediapipe">MediaPipe</string>
+    <string name="hub_badge_diffusion">SD · Diffusion</string>
+    <string name="hub_search_placeholder">Search Hugging Face repos…</string>
+    <string name="hub_search_action">Search</string>
+    <string name="hub_preset_litert">LiteRT Mobile</string>
+    <string name="hub_preset_diffusion">Diffusion (SD)</string>
+    <string name="hub_preset_gemma">Gemma</string>
+    <string name="hub_preset_qwen">Qwen</string>
+    <string name="hub_preset_smollm">SmolLM</string>
+    <string name="hub_preset_llama">Llama</string>
+    <string name="hub_preset_gguf">GGUF (llama.cpp)</string>
+    <string name="hub_hf_token_label">Hugging Face Token (for gated repos like Gemma)</string>
+    <string name="hub_hf_token_hint">hf_…</string>
+    <string name="hub_download">Download</string>
+    <string name="hub_downloaded">Saved</string>
+    <string name="hub_no_weight_files">No .gguf, .litertlm, .task, .bin, .safetensors, or .ckpt files found in main branch.</string>
+    <string name="hub_runtime_tip">Supports offline LLMs (llama.cpp, LiteRT-LM with NPU/GPU, MediaPipe) and local Stable Diffusion (.safetensors / .ckpt / SD .gguf) for Image Studio.</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">APIs &amp; Preferences</string>
+    <string name="settings_section_provider">Active API Provider</string>
+    <string name="settings_section_connection">Endpoint &amp; Credentials</string>
+    <string name="settings_server_url_label">API Base URL</string>
+    <string name="settings_server_url_hint">http://10.0.2.2:1234/v1</string>
+    <string name="settings_presets_label">Quick server presets</string>
+    <string name="preset_emulator">Emulator (10.0.2.2)</string>
+    <string name="preset_localhost">Localhost (127.0.0.1)</string>
+    <string name="preset_lan">LAN Template</string>
+    <string name="settings_api_key_label">API Key / Bearer Token</string>
+    <string name="settings_api_key_hint">Enter provider API key (optional for local servers)</string>
+    <string name="settings_test_connection">Test Connection &amp; Fetch Models</string>
+    <string name="settings_connection_help">Each provider stores its own URL, API key, and model selection independently so you can switch freely between local servers, on-device weights, and cloud APIs.</string>
+    <string name="settings_open_model_hub">Manage Hugging Face On-Device Models</string>
+
+    <string name="settings_section_local_engine">On-Device Local Engines</string>
+    <string name="settings_local_engine_label">Inference Engine</string>
+    <string name="settings_local_backend_label">Compute Backend</string>
+    <string name="settings_local_threads_label">CPU Threads (llama.cpp)</string>
+    <string name="engine_auto">Auto</string>
+    <string name="engine_llama_cpp">llama.cpp</string>
+    <string name="engine_litert_lm">LiteRT-LM</string>
+    <string name="engine_mediapipe">MediaPipe</string>
+    <string name="backend_cpu">CPU</string>
+    <string name="backend_gpu">GPU</string>
+    <string name="backend_npu">NPU</string>
+    <string name="npu_status_ready">NPU Ready</string>
+    <string name="npu_status_fallback">Auto Fallback</string>
+    <string name="npu_hardware_title">Hardware &amp; NPU Accelerator</string>
+    <string name="npu_hardware_specs">%1$s · %2$d cores · %3$d GB RAM</string>
+    <string name="npu_tip">LiteRT-LM uses dedicated NPU delegates (Qualcomm Hexagon, Google Tensor, MediaTek APU) with automatic GPU/CPU fallback when unsupported.</string>
+
+    <string name="settings_section_generation">Model &amp; Generation</string>
+    <string name="settings_active_model_label">Model Identifier</string>
+    <string name="settings_system_prompt_label">System Prompt</string>
+    <string name="settings_temperature_label">Temperature</string>
+    <string name="settings_max_tokens_label">Max Response Tokens</string>
+    <string name="settings_context_limit_label">History Context Messages</string>
+
+    <string name="settings_section_appearance">Theme, Language &amp; Voice</string>
+    <string name="theme_system">System</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Dark</string>
+    <string name="theme_amoled">AMOLED</string>
+    <string name="settings_dynamic_color">Material You Dynamic Color</string>
+    <string name="settings_dynamic_color_desc">Match device wallpaper palette on Android 12+</string>
+    <string name="settings_app_language_label">App Interface Language</string>
+    <string name="lang_system">System</string>
+    <string name="lang_uk">Українська</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_en">English</string>
+    <string name="settings_voice_locale_label">Voice Recognition Language</string>
+    <string name="voice_locale_auto">System Default</string>
+    <string name="voice_locale_uk">Ukrainian (uk-UA)</string>
+    <string name="voice_locale_ru">Russian (ru-RU)</string>
+    <string name="voice_locale_en">English (en-US)</string>
+
+    <string name="settings_section_storage">Local Database (Room)</string>
+    <string name="settings_storage_stats">%1$d chats · %2$d messages stored locally</string>
+    <string name="settings_clear_history">Clear All Chat History</string>
+    <string name="dialog_clear_all_title">Clear all local history?</string>
+    <string name="dialog_clear_all_message">This will permanently erase every saved conversation and message from the on-device Room database.</string>
+    <string name="action_clear_all">Clear All</string>
+
+    <!-- Agents & MCP Screen -->
+    <string name="agents_mcp_title">Agents &amp; MCP</string>
+    <string name="agents_tab">AI Agents</string>
+    <string name="mcp_tab">MCP Servers</string>
+    <string name="agents_standard_chat">Standard Chat (No Agent)</string>
+    <string name="agents_standard_chat_desc">Direct chat using your active model and optional tools.</string>
+    <string name="agents_active_pill">Agent: %1$s</string>
+    <string name="agents_create_button">Create Agent</string>
+    <string name="agents_create_title">Create Custom Agent</string>
+    <string name="agents_name_label">Agent Name</string>
+    <string name="agents_desc_label">Short Description</string>
+    <string name="agents_prompt_label">Agent Instructions (System Prompt)</string>
+    <string name="agents_max_steps_label">Max Reasoning Steps</string>
+    <string name="agents_use_builtin_tools">Allow Built-in Local MCP Tools</string>
+    <string name="agents_use_remote_mcp">Allow Connected MCP Servers</string>
+    <string name="agents_activate">Activate</string>
+    <string name="agents_active_badge">Active</string>
+    <string name="agents_notes_section">Agent Memory Notes</string>
+    <string name="agents_notes_empty">No saved memory notes yet. Ask the Personal Memory Agent to remember something.</string>
+    <string name="mcp_builtin_section">Built-in Local MCP Tools</string>
+    <string name="mcp_builtin_desc">Works on every model — math evaluator, live Wikipedia, webpage reader, clock &amp; persistent memory notes.</string>
+    <string name="mcp_remote_section">Remote MCP Servers (JSON-RPC 2.0)</string>
+    <string name="mcp_add_server">Add MCP Server</string>
+    <string name="mcp_add_title">Connect MCP Server</string>
+    <string name="mcp_server_name_label">Server Name</string>
+    <string name="mcp_server_url_label">HTTP / Streamable-HTTP Endpoint</string>
+    <string name="mcp_server_auth_label">Auth Header or Bearer Token (optional)</string>
+    <string name="mcp_sync_tools">Sync Tools</string>
+    <string name="mcp_no_servers">No remote MCP servers added yet. Add any Streamable-HTTP MCP server URL to discover and call its tools automatically.</string>
+    <string name="mcp_tools_count">%1$d tools</string>
+    <string name="settings_open_agents_mcp">Manage AI Agents &amp; MCP Servers</string>
+    <string name="agents_search_placeholder">Search %1$d agents…</string>
+
+    <!-- Code Sandbox Screen -->
+    <string name="action_code_sandbox">Code Sandbox</string>
+    <string name="sandbox_title">Code Sandbox</string>
+    <string name="sandbox_tab_code">Code</string>
+    <string name="sandbox_tab_preview">Preview</string>
+    <string name="sandbox_tab_console">Console</string>
+    <string name="sandbox_run">Run</string>
+    <string name="sandbox_reset">Template</string>
+    <string name="sandbox_clear_console">Clear</string>
+    <string name="sandbox_ai_placeholder">Ask AI to write, modify, or fix code…</string>
+    <string name="sandbox_ai_generate">AI Write</string>
+    <string name="sandbox_ai_fix">Fix Errors</string>
+    <string name="sandbox_console_empty">Tap Run to execute your code. Console output and errors appear here.</string>
+    <string name="action_run_in_sandbox">Run</string>
+    <string name="sandbox_quick_snake">Snake game</string>
+    <string name="sandbox_quick_calc">Glass calculator</string>
+    <string name="sandbox_quick_chart">Animated chart</string>
+    <string name="sandbox_quick_sort">Sort algorithm</string>
+
+    <!-- Local Uncensored Image Studio -->
+    <string name="action_image_studio">Image Studio</string>
+    <string name="image_studio_title">Local Image Studio</string>
+    <string name="image_studio_uncensored_badge">Local · Uncensored</string>
+    <string name="image_studio_mode_on_device">On-Device (sd.cpp)</string>
+    <string name="image_studio_mode_a1111">A1111 / Forge</string>
+    <string name="image_studio_mode_openai">Local API</string>
+    <string name="image_studio_checkpoint_label">Local Diffusion Checkpoint</string>
+    <string name="image_studio_no_checkpoint">No local .safetensors / .ckpt checkpoint yet. Import one from storage or download from Hugging Face Hub (Diffusion preset).</string>
+    <string name="image_studio_import_checkpoint">Import .safetensors/.ckpt</string>
+    <string name="image_studio_browse_hf">Download on HF Hub</string>
+    <string name="image_studio_server_url">Local WebUI / API Server URL</string>
+    <string name="image_studio_server_model">Checkpoint / Model Name (optional)</string>
+    <string name="image_studio_probe_server">Check Server &amp; Checkpoints</string>
+    <string name="image_studio_prompt_label">Prompt (raw &amp; unfiltered)</string>
+    <string name="image_studio_prompt_placeholder">Describe any scene, style, lighting, or subject…</string>
+    <string name="image_studio_negative_label">Negative Prompt</string>
+    <string name="image_studio_enhance_prompt">AI Enhance</string>
+    <string name="image_studio_img2img_title">Image-to-Image Reference (optional)</string>
+    <string name="image_studio_pick_reference">Pick Photo</string>
+    <string name="image_studio_clear_reference">Clear</string>
+    <string name="image_studio_strength_label">Denoise Strength</string>
+    <string name="image_studio_resolution_label">Resolution</string>
+    <string name="image_studio_steps_label">Steps</string>
+    <string name="image_studio_cfg_label">CFG Scale</string>
+    <string name="image_studio_seed_label">Seed (-1 = random)</string>
+    <string name="image_studio_generate">Generate Locally</string>
+    <string name="image_studio_generating">Generating…</string>
+    <string name="image_studio_gallery_title">Local Gallery (%1$d)</string>
+    <string name="image_studio_gallery_empty">Generated images stay 100% private on your device and appear here.</string>
+    <string name="image_studio_save_gallery">Save to Gallery</string>
+    <string name="image_studio_send_chat">Send to Chat</string>
+    <string name="image_studio_reuse_settings">Reuse Prompt &amp; Seed</string>
+    <string name="settings_open_image_studio">Open Local Uncensored Image Studio</string>
+</resources>

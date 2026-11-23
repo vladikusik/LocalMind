@@ -1,0 +1,268 @@
+<resources>
+    <string name="app_name">LocalMind</string>
+    <string name="studio_tagline">Локальные LLM и все ИИ API</string>
+
+    <!-- Navigation & Drawer -->
+    <string name="action_open_drawer">Открыть историю чатов</string>
+    <string name="action_new_chat">Новый чат</string>
+    <string name="action_settings">API и настройки</string>
+    <string name="action_model_hub">Модели Hugging Face</string>
+    <string name="action_agents_mcp">Агенты и MCP</string>
+    <string name="action_back">Назад</string>
+    <string name="search_chats_placeholder">Поиск диалогов…</string>
+    <string name="drawer_section_pinned">Закреплённые</string>
+    <string name="drawer_section_recent">Недавние</string>
+    <string name="drawer_empty_title">Сохранённых чатов пока нет</string>
+    <string name="drawer_empty_subtitle">Все ваши диалоги хранятся приватно в локальной базе Room.</string>
+    <string name="drawer_no_search_results">Ничего не найдено</string>
+    <string name="drawer_theme_label">Тема оформления</string>
+
+    <!-- Conversation Menu -->
+    <string name="action_more_options">Ещё</string>
+    <string name="action_rename">Переименовать</string>
+    <string name="action_pin">Закрепить</string>
+    <string name="action_unpin">Открепить</string>
+    <string name="action_export_markdown">Экспорт Markdown</string>
+    <string name="action_delete">Удалить</string>
+    <string name="dialog_rename_title">Переименовать чат</string>
+    <string name="dialog_rename_hint">Название диалога</string>
+    <string name="dialog_delete_title">Удалить диалог?</string>
+    <string name="dialog_delete_message">Чат и все сообщения будут навсегда удалены из локальной базы данных.</string>
+    <string name="action_cancel">Отмена</string>
+    <string name="action_save">Сохранить</string>
+    <string name="action_confirm_delete">Удалить</string>
+
+    <!-- Connection & Models -->
+    <string name="status_connected">Подключено</string>
+    <string name="status_checking">Проверка…</string>
+    <string name="status_offline">Офлайн</string>
+    <string name="status_on_device_ready">Готово на устройстве</string>
+    <string name="model_auto_detect">Выбрать модель</string>
+    <string name="model_picker_title">Провайдер и модель</string>
+    <string name="model_picker_refresh">Обновить модели</string>
+    <string name="model_picker_empty">Модели не загружены. Проверьте URL сервера, API-ключ или скачайте локальную модель с Hugging Face.</string>
+    <string name="provider_section_free">Бесплатные облачные модели</string>
+    <string name="provider_section_local">Локальные и на устройстве</string>
+    <string name="provider_section_cloud">Облачные API</string>
+
+    <!-- Empty Welcome State -->
+    <string name="welcome_title">Локальные модели и все ИИ API.</string>
+    <string name="welcome_subtitle">Запускайте модели Hugging Face прямо на телефоне, подключайте LM Studio / Ollama или переключайтесь на OpenAI, Claude, Gemini, DeepSeek, Groq и OpenRouter.</string>
+    <string name="welcome_configure_server">Настроить API</string>
+    <string name="welcome_download_models">Хаб Hugging Face</string>
+    <string name="prompt_chip_code_title">Код на Kotlin</string>
+    <string name="prompt_chip_code_body">Напиши пример Kotlin Coroutines с Flow debounce и обработкой ошибок.</string>
+    <string name="prompt_chip_explain_title">Сравнение</string>
+    <string name="prompt_chip_explain_body">Создай краткую таблицу Markdown для сравнения REST, GraphQL и gRPC.</string>
+    <string name="prompt_chip_debug_title">Архитектура</string>
+    <string name="prompt_chip_debug_body">Опиши лучшие практики проектирования offline-first мобильного приложения.</string>
+    <string name="prompt_chip_write_title">Редактура текста</string>
+    <string name="prompt_chip_write_body">Помоги составить краткий отчёт о статусе проекта для команды разработки.</string>
+
+    <!-- Chat Composer & Messages -->
+    <string name="composer_placeholder">Напишите ИИ-модели…</string>
+    <string name="composer_listening">Слушаю… говорите сейчас</string>
+    <string name="action_send">Отправить</string>
+    <string name="action_stop">Остановить генерацию</string>
+    <string name="action_voice_start">Начать голосовой ввод</string>
+    <string name="action_voice_stop">Остановить голосовой ввод</string>
+    <string name="action_copy">Копировать</string>
+    <string name="action_copied">Скопировано</string>
+    <string name="action_regenerate">Перегенерировать</string>
+    <string name="action_retry">Повторить</string>
+    <string name="action_share">Поделиться</string>
+    <string name="action_copy_code">Копировать код</string>
+    <string name="thinking_section_label">Ход рассуждений</string>
+    <string name="thinking_in_progress">Размышляю…</string>
+    <string name="generating_placeholder">Генерация…</string>
+    <string name="role_user">Вы</string>
+    <string name="role_assistant">Ассистент</string>
+    <string name="voice_permission_denied">Для голосового ввода требуется разрешение на микрофон.</string>
+    <string name="voice_unavailable">Сервис распознавания речи недоступен на этом устройстве.</string>
+    <string name="action_attach">Прикрепить фото или файл</string>
+    <string name="action_attach_photo">Фото</string>
+    <string name="action_attach_file">Документ / Файл</string>
+    <string name="action_remove_attachment">Удалить вложение</string>
+    <string name="action_scroll_to_bottom">Вниз</string>
+
+    <!-- Hugging Face Model Hub Screen -->
+    <string name="hub_title">Хаб моделей Hugging Face</string>
+    <string name="hub_downloaded_section">Скачанные модели на устройстве</string>
+    <string name="hub_no_downloaded">Модели ещё не скачаны. Скачайте любую модель GGUF (llama.cpp), .litertlm (LiteRT-LM) или .task (MediaPipe) ниже для запуска полностью офлайн.</string>
+    <string name="hub_import_local">Импорт файла</string>
+    <string name="hub_use_model">Выбрать</string>
+    <string name="hub_active_badge">Активна</string>
+    <string name="hub_on_device_badge">На устройстве</string>
+    <string name="hub_desktop_gguf_badge">GGUF</string>
+    <string name="hub_badge_llama_cpp">llama.cpp · GGUF</string>
+    <string name="hub_badge_litert_lm">LiteRT-LM</string>
+    <string name="hub_badge_mediapipe">MediaPipe</string>
+    <string name="hub_badge_diffusion">SD · Диффузия</string>
+    <string name="hub_search_placeholder">Поиск репозиториев Hugging Face…</string>
+    <string name="hub_search_action">Найти</string>
+    <string name="hub_preset_litert">LiteRT Мобильные</string>
+    <string name="hub_preset_diffusion">Диффузия (SD)</string>
+    <string name="hub_preset_gemma">Gemma</string>
+    <string name="hub_preset_qwen">Qwen</string>
+    <string name="hub_preset_smollm">SmolLM</string>
+    <string name="hub_preset_llama">Llama</string>
+    <string name="hub_preset_gguf">GGUF (llama.cpp)</string>
+    <string name="hub_hf_token_label">Токен Hugging Face (для закрытых репо, например Gemma)</string>
+    <string name="hub_hf_token_hint">hf_…</string>
+    <string name="hub_download">Скачать</string>
+    <string name="hub_downloaded">Сохранено</string>
+    <string name="hub_no_weight_files">В ветке main не найдено файлов .gguf, .litertlm, .task, .bin, .safetensors или .ckpt.</string>
+    <string name="hub_runtime_tip">Поддерживаются офлайн LLM (llama.cpp, LiteRT-LM с NPU/GPU, MediaPipe) и локальные модели Stable Diffusion (.safetensors / .ckpt / SD .gguf) для Студии изображений.</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">API и настройки</string>
+    <string name="settings_section_provider">Активный API-провайдер</string>
+    <string name="settings_section_connection">Адрес и ключи доступа</string>
+    <string name="settings_server_url_label">Базовый URL API</string>
+    <string name="settings_server_url_hint">http://10.0.2.2:1234/v1</string>
+    <string name="settings_presets_label">Быстрые адреса сервера</string>
+    <string name="preset_emulator">Эмулятор (10.0.2.2)</string>
+    <string name="preset_localhost">Localhost (127.0.0.1)</string>
+    <string name="preset_lan">Локальная сеть (LAN)</string>
+    <string name="settings_api_key_label">API-ключ / Bearer Token</string>
+    <string name="settings_api_key_hint">Введите API-ключ (необязательно для локальных серверов)</string>
+    <string name="settings_test_connection">Проверить соединение и модели</string>
+    <string name="settings_connection_help">Каждый провайдер хранит свой URL, API-ключ и выбранную модель отдельно — переключайтесь свободно между локальными серверами, моделями на устройстве и облачными API.</string>
+    <string name="settings_open_model_hub">Управление локальными моделями Hugging Face</string>
+
+    <string name="settings_section_local_engine">Локальные движки на устройстве</string>
+    <string name="settings_local_engine_label">Движок инференса</string>
+    <string name="settings_local_backend_label">Ускоритель</string>
+    <string name="settings_local_threads_label">Потоки CPU (llama.cpp)</string>
+    <string name="engine_auto">Авто</string>
+    <string name="engine_llama_cpp">llama.cpp</string>
+    <string name="engine_litert_lm">LiteRT-LM</string>
+    <string name="engine_mediapipe">MediaPipe</string>
+    <string name="backend_cpu">CPU</string>
+    <string name="backend_gpu">GPU</string>
+    <string name="backend_npu">NPU</string>
+    <string name="npu_status_ready">NPU готов</string>
+    <string name="npu_status_fallback">Авто-резерв</string>
+    <string name="npu_hardware_title">Аппаратное ускорение и NPU</string>
+    <string name="npu_hardware_specs">%1$s · %2$d ядер · %3$d ГБ ОЗУ</string>
+    <string name="npu_tip">LiteRT-LM использует аппаратные NPU-делегаты (Qualcomm Hexagon, Google Tensor, MediaTek APU) с автоматическим переходом на GPU/CPU при необходимости.</string>
+
+    <string name="settings_section_generation">Модель и генерация</string>
+    <string name="settings_active_model_label">Идентификатор модели</string>
+    <string name="settings_system_prompt_label">Системный промпт</string>
+    <string name="settings_temperature_label">Температура</string>
+    <string name="settings_max_tokens_label">Макс. токенов ответа</string>
+    <string name="settings_context_limit_label">Сообщений в контексте</string>
+
+    <string name="settings_section_appearance">Тема, язык и голос</string>
+    <string name="theme_system">Системная</string>
+    <string name="theme_light">Светлая</string>
+    <string name="theme_dark">Тёмная</string>
+    <string name="theme_amoled">AMOLED</string>
+    <string name="settings_dynamic_color">Динамические цвета Material You</string>
+    <string name="settings_dynamic_color_desc">Палитра обоев на Android 12+</string>
+    <string name="settings_app_language_label">Язык интерфейса</string>
+    <string name="lang_system">Системный</string>
+    <string name="lang_uk">Українська</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_en">English</string>
+    <string name="settings_voice_locale_label">Язык распознавания голоса</string>
+    <string name="voice_locale_auto">Системный по умолчанию</string>
+    <string name="voice_locale_uk">Украинский (uk-UA)</string>
+    <string name="voice_locale_ru">Русский (ru-RU)</string>
+    <string name="voice_locale_en">Английский (en-US)</string>
+
+    <string name="settings_section_storage">Локальная база данных (Room)</string>
+    <string name="settings_storage_stats">%1$d чатов · %2$d сообщений сохранено локально</string>
+    <string name="settings_clear_history">Очистить всю историю чатов</string>
+    <string name="dialog_clear_all_title">Очистить всю локальную историю?</string>
+    <string name="dialog_clear_all_message">Это навсегда удалит все сохранённые диалоги и сообщения из локальной базы Room.</string>
+    <string name="action_clear_all">Очистить всё</string>
+
+    <!-- Agents & MCP Screen -->
+    <string name="agents_mcp_title">Агенты и MCP</string>
+    <string name="agents_tab">ИИ-Агенты</string>
+    <string name="mcp_tab">MCP-серверы</string>
+    <string name="agents_standard_chat">Обычный чат (без агента)</string>
+    <string name="agents_standard_chat_desc">Прямой диалог с активной моделью и выбранными инструментами.</string>
+    <string name="agents_active_pill">Агент: %1$s</string>
+    <string name="agents_create_button">Создать агента</string>
+    <string name="agents_create_title">Новый ИИ-агент</string>
+    <string name="agents_name_label">Название агента</string>
+    <string name="agents_desc_label">Краткое описание</string>
+    <string name="agents_prompt_label">Инструкции агента (Системный промпт)</string>
+    <string name="agents_max_steps_label">Макс. шагов рассуждения</string>
+    <string name="agents_use_builtin_tools">Разрешить встроенные MCP-инструменты</string>
+    <string name="agents_use_remote_mcp">Разрешить подключённые MCP-серверы</string>
+    <string name="agents_activate">Активировать</string>
+    <string name="agents_active_badge">Активный</string>
+    <string name="agents_notes_section">Память агента (Заметки)</string>
+    <string name="agents_notes_empty">Сохранённых заметок пока нет. Попросите агента памяти что-нибудь запомнить.</string>
+    <string name="mcp_builtin_section">Встроенные локальные MCP-инструменты</string>
+    <string name="mcp_builtin_desc">Работают на любой модели — точный калькулятор, живая Википедия, чтение веб-страниц, часы и локальная память.</string>
+    <string name="mcp_remote_section">Удалённые MCP-серверы (JSON-RPC 2.0)</string>
+    <string name="mcp_add_server">Добавить MCP-сервер</string>
+    <string name="mcp_add_title">Подключить MCP-сервер</string>
+    <string name="mcp_server_name_label">Название сервера</string>
+    <string name="mcp_server_url_label">HTTP / Streamable-HTTP адрес</string>
+    <string name="mcp_server_auth_label">Заголовок Auth или Bearer Token (необязательно)</string>
+    <string name="mcp_sync_tools">Обновить инструменты</string>
+    <string name="mcp_no_servers">Удалённые MCP-серверы ещё не добавлены. Добавьте URL любого HTTP MCP-сервера, чтобы автоматически загрузить его инструменты.</string>
+    <string name="mcp_tools_count">%1$d инструментов</string>
+    <string name="settings_open_agents_mcp">Управление ИИ-агентами и MCP-серверами</string>
+    <string name="agents_search_placeholder">Поиск среди %1$d агентов…</string>
+
+    <!-- Code Sandbox Screen -->
+    <string name="action_code_sandbox">Песочница кода</string>
+    <string name="sandbox_title">Песочница кода</string>
+    <string name="sandbox_tab_code">Код</string>
+    <string name="sandbox_tab_preview">Превью</string>
+    <string name="sandbox_tab_console">Консоль</string>
+    <string name="sandbox_run">Запустить</string>
+    <string name="sandbox_reset">Шаблон</string>
+    <string name="sandbox_clear_console">Очистить</string>
+    <string name="sandbox_ai_placeholder">Попросите ИИ написать, изменить или исправить код…</string>
+    <string name="sandbox_ai_generate">Написать с ИИ</string>
+    <string name="sandbox_ai_fix">Исправить ошибки</string>
+    <string name="sandbox_console_empty">Нажмите «Запустить», чтобы выполнить код. Вывод консоли и ошибки появятся здесь.</string>
+    <string name="action_run_in_sandbox">Запустить</string>
+    <string name="sandbox_quick_snake">Игра Змейка</string>
+    <string name="sandbox_quick_calc">Калькулятор</string>
+    <string name="sandbox_quick_chart">Живой график</string>
+    <string name="sandbox_quick_sort">Сортировка</string>
+
+    <!-- Local Uncensored Image Studio -->
+    <string name="action_image_studio">Студия изображений</string>
+    <string name="image_studio_title">Локальная студия изображений</string>
+    <string name="image_studio_uncensored_badge">Локально · Без цензуры</string>
+    <string name="image_studio_mode_on_device">На устройстве (sd.cpp)</string>
+    <string name="image_studio_mode_a1111">A1111 / Forge</string>
+    <string name="image_studio_mode_openai">Локальный API</string>
+    <string name="image_studio_checkpoint_label">Локальный чекпойнт диффузии</string>
+    <string name="image_studio_no_checkpoint">Локальных чекпойнтов .safetensors / .ckpt ещё нет. Импортируйте файл с телефона или скачайте с Hugging Face (пресет «Диффузия»).</string>
+    <string name="image_studio_import_checkpoint">Импорт .safetensors/.ckpt</string>
+    <string name="image_studio_browse_hf">Скачать с HF Hub</string>
+    <string name="image_studio_server_url">URL локального WebUI / API сервера</string>
+    <string name="image_studio_server_model">Имя чекпойнта / модели (необязательно)</string>
+    <string name="image_studio_probe_server">Проверить сервер и модели</string>
+    <string name="image_studio_prompt_label">Промпт (без фильтров и цензуры)</string>
+    <string name="image_studio_prompt_placeholder">Опишите сцену, стиль, свет или детали…</string>
+    <string name="image_studio_negative_label">Негативный промпт</string>
+    <string name="image_studio_enhance_prompt">Улучшить с ИИ</string>
+    <string name="image_studio_img2img_title">Img2Img референс (необязательно)</string>
+    <string name="image_studio_pick_reference">Выбрать фото</string>
+    <string name="image_studio_clear_reference">Очистить</string>
+    <string name="image_studio_strength_label">Сила изменений (Denoise)</string>
+    <string name="image_studio_resolution_label">Разрешение</string>
+    <string name="image_studio_steps_label">Шаги</string>
+    <string name="image_studio_cfg_label">CFG Scale</string>
+    <string name="image_studio_seed_label">Seed (-1 = случайный)</string>
+    <string name="image_studio_generate">Сгенерировать локально</string>
+    <string name="image_studio_generating">Генерация…</string>
+    <string name="image_studio_gallery_title">Локальная галерея (%1$d)</string>
+    <string name="image_studio_gallery_empty">Сгенерированные изображения хранятся 100% приватно на вашем устройстве и появятся здесь.</string>
+    <string name="image_studio_save_gallery">Сохранить в Галерею</string>
+    <string name="image_studio_send_chat">Отправить в чат</string>
+    <string name="image_studio_reuse_settings">Повторить промпт и Seed</string>
+    <string name="settings_open_image_studio">Открыть локальную студию изображений</string>
+</resources>
