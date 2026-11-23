@@ -42,6 +42,11 @@ enum class ImageGenBackendMode(
         displayName = "On-Device (sd.cpp)",
         defaultUrl = ""
     ),
+    LOCAL_DREAM_NPU(
+        id = "local_dream",
+        displayName = "Local Dream (NPU/MNN)",
+        defaultUrl = LocalDreamCatalog.DEFAULT_SERVER_URL
+    ),
     LOCAL_A1111_FORGE(
         id = "local_a1111",
         displayName = "A1111 / Forge / WebUI",
@@ -156,6 +161,11 @@ class LocalImageGenerator(private val context: Context) {
                     onStatus = onStatus
                 )
 
+                ImageGenBackendMode.LOCAL_DREAM_NPU -> generateViaLocalDream(
+                    request = request.copy(prompt = cleanPrompt, seed = effectiveSeed),
+                    onStatus = onStatus
+                )
+
                 ImageGenBackendMode.LOCAL_A1111_FORGE -> generateViaA1111(
                     request = request.copy(prompt = cleanPrompt, seed = effectiveSeed),
                     onStatus = onStatus
@@ -261,6 +271,158 @@ class LocalImageGenerator(private val context: Context) {
             engineLabel = "sd.cpp (${request.hardwareBackend.id.uppercase()} · ${threads}T)",
             modelName = request.localModelName.ifBlank { modelFile.nameWithoutExtension }
         )
+    }
+
+    /**
+     * Real integration with xororz/local-dream C++ NPU/MNN local API server (default http://127.0.0.1:8081).
+     * Streams SSE progress events from POST /generate and decodes final Base64 output.
+     */
+    private fun generateViaLocalDream(
+        request: ImageGenRequest,
+        onStatus: (String) -> Unit
+    ): ImageGenResult {
+        val baseUrl = request.serverUrl.trim().trimEnd('/').ifBlank { LocalDreamCatalog.DEFAULT_SERVER_URL }
+        require(baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) {
+            "Enter a valid Local Dream server URL (default http://127.0.0.1:8081)."
+        }
+
+        val startMs = System.currentTimeMillis()
+        val width = alignTo64(request.width.coerceIn(256, 1024))
+        val height = alignTo64(request.height.coerceIn(256, 1024))
+        val steps = request.steps.coerceIn(1, 50)
+        val initPath = request.initImagePath?.takeIf { File(it).exists() }
+
+        onStatus("Connecting to Local Dream (${request.hardwareBackend.id.uppercase()}) at $baseUrl…")
+
+        val payload = JSONObject().apply {
+            put("prompt", request.prompt)
+            put("negative_prompt", request.negativePrompt)
+            put("width", width)
+            put("height", height)
+            put("steps", steps)
+            put("cfg", request.cfgScale.toDouble())
+            put("seed", request.seed)
+            put("use_opencl", request.hardwareBackend == LocalHardwareBackend.GPU)
+            put("show_diffusion_process", false)
+            if (request.serverModel.isNotBlank()) {
+                put("model", request.serverModel)
+            }
+            if (initPath != null) {
+                put("image", encodeImageFileBase64(initPath))
+                put("denoise_strength", request.img2imgStrength.coerceIn(0.05f, 0.99f).toDouble())
+                put("strength", request.img2imgStrength.coerceIn(0.05f, 0.99f).toDouble())
+            }
+        }
+
+        val httpReq = Request.Builder()
+            .url("$baseUrl/generate")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .header("Accept", "text/event-stream")
+            .build()
+
+        var finalBase64: String? = null
+        var reportedSeed = request.seed
+        var reportedWidth = width
+        var reportedHeight = height
+
+        httpClient.newCall(httpReq).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                val errBody = resp.body?.string().orEmpty().take(240)
+                throw IOException(
+                    "Local Dream HTTP ${resp.code}: ${errBody.ifBlank { resp.message }}. Make sure Local Dream backend is running on $baseUrl."
+                )
+            }
+
+            val contentType = resp.header("Content-Type").orEmpty().lowercase()
+            val body = resp.body ?: throw IOException("Local Dream returned an empty stream.")
+
+            if (contentType.contains("application/json") && !contentType.contains("text/event-stream")) {
+                val json = JSONObject(body.string())
+                if (json.optString("type") == "error" || json.has("error")) {
+                    throw IOException(json.optString("message").ifBlank { json.optString("error", "Local Dream error") })
+                }
+                finalBase64 = json.optString("image").ifBlank { json.optString("b64_json") }
+                reportedSeed = json.optLong("seed", request.seed)
+                reportedWidth = json.optInt("width", width)
+                reportedHeight = json.optInt("height", height)
+            } else {
+                val reader = body.charStream().buffered()
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty() || !trimmed.startsWith("data:")) continue
+                    val dataJson = trimmed.removePrefix("data:").trim()
+                    if (dataJson.isEmpty() || dataJson == "[DONE]") continue
+
+                    val obj = runCatching { JSONObject(dataJson) }.getOrNull() ?: continue
+                    when (obj.optString("type").lowercase()) {
+                        "progress" -> {
+                            val step = obj.optInt("step", 0)
+                            val total = obj.optInt("total_steps", steps)
+                            onStatus("Local Dream (${request.hardwareBackend.id.uppercase()}) · Step $step/$total")
+                        }
+
+                        "complete", "done", "result" -> {
+                            val img = obj.optString("image").ifBlank { obj.optString("b64_json") }
+                            if (img.isNotBlank()) {
+                                finalBase64 = img
+                            }
+                            reportedSeed = obj.optLong("seed", request.seed)
+                            reportedWidth = obj.optInt("width", width)
+                            reportedHeight = obj.optInt("height", height)
+                        }
+
+                        "error" -> {
+                            throw IOException(obj.optString("message").ifBlank { "Local Dream generation failed." })
+                        }
+
+                        else -> {
+                            val fallbackImg = obj.optString("image")
+                            if (fallbackImg.isNotBlank()) {
+                                finalBase64 = fallbackImg
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val cleanB64 = finalBase64?.substringAfter(",", finalBase64.orEmpty())?.trim().orEmpty()
+        if (cleanB64.isBlank()) {
+            throw IOException("Local Dream stream finished without returning image data.")
+        }
+
+        val imageBytes = Base64.decode(cleanB64, Base64.DEFAULT)
+        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            ?: throw IOException("Failed to decode image returned by Local Dream.")
+        val actualW = bitmap.width.takeIf { it > 0 } ?: reportedWidth
+        val actualH = bitmap.height.takeIf { it > 0 } ?: reportedHeight
+        val outFile = writePngFile(bitmap)
+        bitmap.recycle()
+
+        return ImageGenResult(
+            file = outFile,
+            width = actualW,
+            height = actualH,
+            seed = reportedSeed,
+            durationMs = System.currentTimeMillis() - startMs,
+            engineLabel = "Local Dream (${request.hardwareBackend.id.uppercase()})",
+            modelName = request.localModelName.ifBlank {
+                request.serverModel.ifBlank { "Local Dream QNN/MNN" }
+            }
+        )
+    }
+
+    suspend fun stopLocalDreamServer(serverUrl: String) = withContext(Dispatchers.IO) {
+        val base = serverUrl.trim().trimEnd('/').ifBlank { LocalDreamCatalog.DEFAULT_SERVER_URL }
+        if (!base.startsWith("http://") && !base.startsWith("https://")) return@withContext
+        runCatching {
+            val req = Request.Builder()
+                .url("$base/stop")
+                .post("{}".toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            httpClient.newCall(req).execute().close()
+        }
     }
 
     private fun generateViaA1111(
@@ -435,6 +597,7 @@ class LocalImageGenerator(private val context: Context) {
                 "Server URL must start with http:// or https://"
             }
             val url = when (mode) {
+                ImageGenBackendMode.LOCAL_DREAM_NPU -> "$base/health"
                 ImageGenBackendMode.LOCAL_A1111_FORGE -> "$base/sdapi/v1/sd-models"
                 ImageGenBackendMode.LOCAL_OPENAI_IMAGES -> "$base/models"
                 ImageGenBackendMode.ON_DEVICE_SD_CPP -> return@runCatching emptyList()
@@ -450,22 +613,33 @@ class LocalImageGenerator(private val context: Context) {
             httpClient.newCall(req).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: ${resp.message}")
-                if (mode == ImageGenBackendMode.LOCAL_A1111_FORGE) {
-                    val arr = JSONArray(body)
-                    buildList {
-                        for (i in 0 until arr.length()) {
-                            val obj = arr.optJSONObject(i) ?: continue
-                            val title = obj.optString("title").ifBlank { obj.optString("model_name") }
-                            if (title.isNotBlank()) add(title)
+                when (mode) {
+                    ImageGenBackendMode.LOCAL_DREAM_NPU -> {
+                        val activeModel = runCatching {
+                            JSONObject(body).optString("model").ifBlank { JSONObject(body).optString("status") }
+                        }.getOrDefault("")
+                        listOf(activeModel.ifBlank { "Local Dream Active QNN/MNN" })
+                    }
+
+                    ImageGenBackendMode.LOCAL_A1111_FORGE -> {
+                        val arr = JSONArray(body)
+                        buildList {
+                            for (i in 0 until arr.length()) {
+                                val obj = arr.optJSONObject(i) ?: continue
+                                val title = obj.optString("title").ifBlank { obj.optString("model_name") }
+                                if (title.isNotBlank()) add(title)
+                            }
                         }
                     }
-                } else {
-                    val obj = JSONObject(body)
-                    val data = obj.optJSONArray("data") ?: JSONArray()
-                    buildList {
-                        for (i in 0 until data.length()) {
-                            val id = data.optJSONObject(i)?.optString("id").orEmpty()
-                            if (id.isNotBlank()) add(id)
+
+                    else -> {
+                        val obj = JSONObject(body)
+                        val data = obj.optJSONArray("data") ?: JSONArray()
+                        buildList {
+                            for (i in 0 until data.length()) {
+                                val id = data.optJSONObject(i)?.optString("id").orEmpty()
+                                if (id.isNotBlank()) add(id)
+                            }
                         }
                     }
                 }

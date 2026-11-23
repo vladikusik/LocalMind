@@ -265,4 +265,31 @@
     <string name="image_studio_send_chat">Надіслати в чат</string>
     <string name="image_studio_reuse_settings">Повторити промпт і Seed</string>
     <string name="settings_open_image_studio">Відкрити локальну студію зображень</string>
+
+    <!-- Local Dream (xororz/local-dream) Integration -->
+    <string name="hub_preset_local_dream">Local Dream (QNN/MNN)</string>
+    <string name="hub_badge_local_dream">Local Dream NPU/MNN</string>
+    <string name="image_studio_mode_local_dream">Local Dream (NPU)</string>
+    <string name="local_dream_url_label">URL сервера Local Dream</string>
+    <string name="local_dream_models_title">Моделі Local Dream (xororz QNN / MNN)</string>
+    <string name="local_dream_browse_xororz">Моделі xororz QNN/MNN</string>
+    <string name="local_dream_open_github">GitHub проєкту</string>
+    <string name="local_dream_tip">Підключається напряму до локального NPU/MNN API Local Dream (127.0.0.1:8081) з прогресом кроків у реальному часі та дозволяє скачувати моделі xororz QNN/MNN з Hugging Face.</string>
+    <string name="local_dream_check_health">Перевірити Local Dream (/health)</string>
+
+    <!-- GitHub Releases Auto-Update System -->
+    <string name="settings_section_updates">Оновлення через GitHub</string>
+    <string name="updates_current_version">Встановлена версія: v%1$s (збірка %2$d)</string>
+    <string name="updates_repo_label">Репозиторій GitHub (owner/repo)</string>
+    <string name="updates_repo_placeholder">username/LocalMind</string>
+    <string name="updates_auto_check">Автоперевірка оновлень при запуску</string>
+    <string name="updates_auto_check_desc">Перевіряє останній GitHub Release та наявність нового APK</string>
+    <string name="updates_check_now">Перевірити оновлення</string>
+    <string name="updates_checking">Перевірка GitHub…</string>
+    <string name="updates_up_to_date">У вас найновіша версія (остання: %1$s)</string>
+    <string name="updates_available_title">Доступне оновлення: %1$s</string>
+    <string name="updates_download_apk">Завантажити APK</string>
+    <string name="updates_view_release">Відкрити реліз</string>
+    <string name="updates_banner_text">Доступне оновлення %1$s на GitHub</string>
+    <string name="updates_hint">Вкажіть ваш публічний GitHub-репозиторій, куди ви завантажили проєкт. Нові APK збірки з GitHub Actions з’являтимуться тут автоматично.</string>
 </resources>

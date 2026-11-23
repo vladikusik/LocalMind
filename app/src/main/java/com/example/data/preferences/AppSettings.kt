@@ -59,6 +59,7 @@ data class AppSettings(
     val voiceLocale: VoiceLocale = VoiceLocale.AUTO,
     val appLanguage: AppLanguage = AppLanguage.SYSTEM,
     val imageGenMode: ImageGenBackendMode = ImageGenBackendMode.ON_DEVICE_SD_CPP,
+    val localDreamUrl: String = ImageGenBackendMode.LOCAL_DREAM_NPU.defaultUrl,
     val imageServerUrl: String = ImageGenBackendMode.LOCAL_A1111_FORGE.defaultUrl,
     val imageServerApiKey: String = "",
     val imageServerModel: String = "",
@@ -66,7 +67,10 @@ data class AppSettings(
     val imageWidth: Int = 512,
     val imageHeight: Int = 512,
     val imageSteps: Int = 16,
-    val imageCfgScale: Float = 7.0f
+    val imageCfgScale: Float = 7.0f,
+    val githubUpdateRepo: String = "",
+    val autoCheckUpdates: Boolean = true,
+    val dismissedUpdateTag: String = ""
 ) {
     val activeConfig: ProviderConfig
         get() = providerConfigs[activeProvider] ?: ProviderConfig(
@@ -106,6 +110,7 @@ class SettingsRepository(private val context: Context) {
         val VOICE_LOCALE = stringPreferencesKey("voice_locale")
         val APP_LANGUAGE = stringPreferencesKey("app_language")
         val IMAGE_GEN_MODE = stringPreferencesKey("image_gen_mode")
+        val LOCAL_DREAM_URL = stringPreferencesKey("local_dream_url")
         val IMAGE_SERVER_URL = stringPreferencesKey("image_server_url")
         val IMAGE_SERVER_KEY = stringPreferencesKey("image_server_key")
         val IMAGE_SERVER_MODEL = stringPreferencesKey("image_server_model")
@@ -114,6 +119,9 @@ class SettingsRepository(private val context: Context) {
         val IMAGE_HEIGHT = intPreferencesKey("image_height")
         val IMAGE_STEPS = intPreferencesKey("image_steps")
         val IMAGE_CFG = floatPreferencesKey("image_cfg")
+        val GITHUB_UPDATE_REPO = stringPreferencesKey("github_update_repo")
+        val AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
+        val DISMISSED_UPDATE_TAG = stringPreferencesKey("dismissed_update_tag")
 
         val LEGACY_BASE_URL = stringPreferencesKey("base_url")
         val LEGACY_API_KEY = stringPreferencesKey("api_key")
@@ -162,6 +170,7 @@ class SettingsRepository(private val context: Context) {
             } ?: VoiceLocale.AUTO,
             appLanguage = AppLanguage.fromCode(prefs[Keys.APP_LANGUAGE]),
             imageGenMode = ImageGenBackendMode.fromId(prefs[Keys.IMAGE_GEN_MODE]),
+            localDreamUrl = prefs[Keys.LOCAL_DREAM_URL] ?: ImageGenBackendMode.LOCAL_DREAM_NPU.defaultUrl,
             imageServerUrl = prefs[Keys.IMAGE_SERVER_URL] ?: ImageGenBackendMode.LOCAL_A1111_FORGE.defaultUrl,
             imageServerApiKey = prefs[Keys.IMAGE_SERVER_KEY] ?: "",
             imageServerModel = prefs[Keys.IMAGE_SERVER_MODEL] ?: "",
@@ -169,7 +178,10 @@ class SettingsRepository(private val context: Context) {
             imageWidth = (prefs[Keys.IMAGE_WIDTH] ?: 512).coerceIn(256, 1024),
             imageHeight = (prefs[Keys.IMAGE_HEIGHT] ?: 512).coerceIn(256, 1024),
             imageSteps = (prefs[Keys.IMAGE_STEPS] ?: 16).coerceIn(1, 50),
-            imageCfgScale = (prefs[Keys.IMAGE_CFG] ?: 7.0f).coerceIn(1.0f, 15.0f)
+            imageCfgScale = (prefs[Keys.IMAGE_CFG] ?: 7.0f).coerceIn(1.0f, 15.0f),
+            githubUpdateRepo = prefs[Keys.GITHUB_UPDATE_REPO] ?: "",
+            autoCheckUpdates = prefs[Keys.AUTO_CHECK_UPDATES] ?: true,
+            dismissedUpdateTag = prefs[Keys.DISMISSED_UPDATE_TAG] ?: ""
         )
     }
 
@@ -253,10 +265,17 @@ class SettingsRepository(private val context: Context) {
     suspend fun updateImageGenMode(mode: ImageGenBackendMode) {
         context.settingsDataStore.edit { prefs ->
             prefs[Keys.IMAGE_GEN_MODE] = mode.id
-            if (mode.defaultUrl.isNotBlank() && prefs[Keys.IMAGE_SERVER_URL].isNullOrBlank()) {
+            if (mode != ImageGenBackendMode.LOCAL_DREAM_NPU &&
+                mode.defaultUrl.isNotBlank() &&
+                prefs[Keys.IMAGE_SERVER_URL].isNullOrBlank()
+            ) {
                 prefs[Keys.IMAGE_SERVER_URL] = mode.defaultUrl
             }
         }
+    }
+
+    suspend fun updateLocalDreamUrl(url: String) {
+        context.settingsDataStore.edit { it[Keys.LOCAL_DREAM_URL] = url.trim() }
     }
 
     suspend fun updateImageServerUrl(url: String) {
@@ -288,5 +307,17 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun updateImageCfgScale(cfg: Float) {
         context.settingsDataStore.edit { it[Keys.IMAGE_CFG] = cfg.coerceIn(1.0f, 15.0f) }
+    }
+
+    suspend fun updateGitHubUpdateRepo(repo: String) {
+        context.settingsDataStore.edit { it[Keys.GITHUB_UPDATE_REPO] = repo.trim() }
+    }
+
+    suspend fun updateAutoCheckUpdates(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.AUTO_CHECK_UPDATES] = enabled }
+    }
+
+    suspend fun updateDismissedUpdateTag(tag: String) {
+        context.settingsDataStore.edit { it[Keys.DISMISSED_UPDATE_TAG] = tag.trim() }
     }
 }

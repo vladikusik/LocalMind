@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.rounded.FileOpen
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Replay
@@ -86,6 +88,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -98,6 +101,8 @@ import com.example.R
 import com.example.data.imagegen.GeneratedImageEntity
 import com.example.data.imagegen.ImageGenBackendMode
 import com.example.data.imagegen.ImageStudioUiState
+import com.example.data.imagegen.LocalDreamCatalog
+import com.example.data.updates.GitHubUpdateManager
 import com.example.data.local.DownloadedModelEntity
 import com.example.data.localmodel.HardwareAcceleratorInfo
 import com.example.data.localmodel.LocalHardwareBackend
@@ -123,10 +128,12 @@ fun ImageStudioScreen(
     onClearNotice: () -> Unit,
     onNavigateBack: () -> Unit,
     onOpenDiffusionHub: () -> Unit,
+    onOpenLocalDreamHub: () -> Unit,
     onImportCheckpointUri: (Uri) -> Unit,
     onSelectMode: (ImageGenBackendMode) -> Unit,
     onSelectBackend: (LocalHardwareBackend) -> Unit,
     onSelectLocalCheckpoint: (String) -> Unit,
+    onUpdateLocalDreamUrl: (String) -> Unit,
     onUpdateServerUrl: (String) -> Unit,
     onUpdateServerModel: (String) -> Unit,
     onProbeServer: () -> Unit,
@@ -150,8 +157,10 @@ fun ImageStudioScreen(
 ) {
     BackHandler(onBack = onNavigateBack)
 
+    val context = LocalContext.current
     val studioColors = LocalStudioColors.current
     val snackbarHostState = remember { SnackbarHostState() }
+    var localDreamUrlDraft by remember(settings.localDreamUrl) { mutableStateOf(settings.localDreamUrl) }
     var serverUrlDraft by remember(settings.imageServerUrl) { mutableStateOf(settings.imageServerUrl) }
     var serverModelDraft by remember(settings.imageServerModel) { mutableStateOf(settings.imageServerModel) }
     var inspectedImage by remember { mutableStateOf<GeneratedImageEntity?>(null) }
@@ -160,7 +169,7 @@ fun ImageStudioScreen(
         downloadedModels.filter { model ->
             val exists = File(model.localPath).exists()
             val ext = model.format.lowercase()
-            exists && (ext == "safetensors" || ext == "ckpt" || ext == "gguf")
+            exists && (LocalDreamCatalog.isImageModelFormat(ext) || ext == "gguf")
         }
     }
 
@@ -441,6 +450,7 @@ fun ImageStudioScreen(
                                 ) {
                                     val modes = listOf(
                                         ImageGenBackendMode.ON_DEVICE_SD_CPP to stringResource(R.string.image_studio_mode_on_device),
+                                        ImageGenBackendMode.LOCAL_DREAM_NPU to stringResource(R.string.image_studio_mode_local_dream),
                                         ImageGenBackendMode.LOCAL_A1111_FORGE to stringResource(R.string.image_studio_mode_a1111),
                                         ImageGenBackendMode.LOCAL_OPENAI_IMAGES to stringResource(R.string.image_studio_mode_openai)
                                     )
@@ -573,6 +583,143 @@ fun ImageStudioScreen(
                                                 style = MaterialTheme.typography.labelMedium,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                } else if (settings.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
+                                    Text(
+                                        text = stringResource(R.string.local_dream_models_title),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.local_dream_tip),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    OutlinedTextField(
+                                        value = localDreamUrlDraft,
+                                        onValueChange = {
+                                            localDreamUrlDraft = it
+                                            onUpdateLocalDreamUrl(it)
+                                        },
+                                        label = { Text(stringResource(R.string.local_dream_url_label)) },
+                                        placeholder = { Text(LocalDreamCatalog.DEFAULT_SERVER_URL) },
+                                        singleLine = true,
+                                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("local_dream_url_input")
+                                    )
+
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        listOf(
+                                            "On-Device (8081)" to "http://127.0.0.1:8081",
+                                            stringResource(R.string.preset_emulator) to "http://10.0.2.2:8081",
+                                            stringResource(R.string.preset_lan) to "http://192.168.1.100:8081"
+                                        ).forEach { (label, presetUrl) ->
+                                            FilterChip(
+                                                selected = localDreamUrlDraft.trim() == presetUrl,
+                                                onClick = {
+                                                    localDreamUrlDraft = presetUrl
+                                                    onUpdateLocalDreamUrl(presetUrl)
+                                                },
+                                                label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                                            )
+                                        }
+                                    }
+
+                                    // Curated xororz/local-dream model presets (QNN NPU & MNN CPU/GPU)
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        LocalDreamCatalog.curatedRepos.forEach { preset ->
+                                            FilterChip(
+                                                selected = serverModelDraft == preset.repoId,
+                                                onClick = {
+                                                    serverModelDraft = preset.repoId
+                                                    onUpdateServerModel(preset.repoId)
+                                                },
+                                                label = {
+                                                    Text(
+                                                        text = "${preset.repoId.substringAfter('/')} · ${preset.runtimeTag}",
+                                                        style = MaterialTheme.typography.labelSmall
+                                                    )
+                                                },
+                                                modifier = Modifier.testTag("local_dream_preset_${preset.repoId.replace('/', '_')}")
+                                            )
+                                        }
+                                    }
+
+                                    FilledTonalButton(
+                                        onClick = onProbeServer,
+                                        enabled = !studioState.isProbingServer,
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("local_dream_health_button")
+                                    ) {
+                                        if (studioState.isProbingServer) {
+                                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                                        } else {
+                                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(stringResource(R.string.local_dream_check_health))
+                                    }
+
+                                    if (!studioState.serverStatus.isNullOrBlank()) {
+                                        Text(
+                                            text = studioState.serverStatus,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        FilledTonalButton(
+                                            onClick = onOpenLocalDreamHub,
+                                            shape = RoundedCornerShape(14.dp),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("local_dream_browse_hf_button")
+                                        ) {
+                                            Icon(Icons.Rounded.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = stringResource(R.string.local_dream_browse_xororz),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                if (GitHubUpdateManager.isTrustedGitHubUrl(LocalDreamCatalog.GITHUB_URL)) {
+                                                    runCatching {
+                                                        context.startActivity(
+                                                            Intent(Intent.ACTION_VIEW, Uri.parse(LocalDreamCatalog.GITHUB_URL))
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(14.dp),
+                                            modifier = Modifier.testTag("local_dream_open_github_button")
+                                        ) {
+                                            Icon(Icons.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = stringResource(R.string.local_dream_open_github),
+                                                style = MaterialTheme.typography.labelMedium
                                             )
                                         }
                                     }

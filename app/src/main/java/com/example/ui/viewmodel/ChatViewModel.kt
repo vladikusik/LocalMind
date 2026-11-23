@@ -10,12 +10,16 @@ import com.example.data.huggingface.HfModelFile
 import com.example.data.huggingface.HfRepoSummary
 import com.example.data.huggingface.HuggingFaceClient
 import com.example.data.huggingface.ModelDownloadProgress
+import com.example.BuildConfig
 import com.example.data.imagegen.GeneratedImageEntity
 import com.example.data.imagegen.ImageGenBackendMode
 import com.example.data.imagegen.ImageGenRequest
 import com.example.data.imagegen.ImageStudioStateHolder
 import com.example.data.imagegen.ImageStudioUiState
+import com.example.data.imagegen.LocalDreamCatalog
 import com.example.data.imagegen.LocalImageGenerator
+import com.example.data.updates.GitHubUpdateManager
+import com.example.data.updates.UpdateCheckState
 import com.example.data.local.AppDatabase
 import com.example.data.local.ConversationSummary
 import com.example.data.local.DownloadedModelEntity
@@ -123,6 +127,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val mcpClient = McpClient()
     private val sandboxHolder = SandboxStateHolder()
     private val imageStudioHolder = ImageStudioStateHolder()
+    private val githubUpdateManager = GitHubUpdateManager()
     val hardwareInfo: HardwareAcceleratorInfo = HardwareAcceleratorInspector.inspect(application)
 
     private val builtInMcpTools = BuiltInMcpTools(
@@ -253,6 +258,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _mcpBusyServerId = MutableStateFlow<String?>(null)
     val mcpBusyServerId: StateFlow<String?> = _mcpBusyServerId.asStateFlow()
 
+    private val _updateState = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
+    val updateState: StateFlow<UpdateCheckState> = _updateState.asStateFlow()
+
     private var generationJob: Job? = null
     private var sandboxAiJob: Job? = null
     private var imageGenJob: Job? = null
@@ -267,6 +275,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 baseUrlOverride = initial.baseUrl,
                 apiKeyOverride = initial.apiKey
             )
+            if (initial.autoCheckUpdates && initial.githubUpdateRepo.isNotBlank()) {
+                checkForGitHubUpdates(repoOverride = initial.githubUpdateRepo, silent = true)
+            }
         }
         searchHuggingFacePreset("gguf")
     }
@@ -646,6 +657,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val (author, query) = when (preset) {
             "gguf" -> null to "Qwen2.5-1.5B-Instruct-GGUF"
             "litert" -> "litert-community" to ""
+            "localdream" -> LocalDreamCatalog.HF_AUTHOR to ""
             "diffusion" -> null to "stable-diffusion-v1-5 safetensors"
             "gemma" -> null to "gemma-3 GGUF"
             "qwen" -> null to "Qwen2.5 GGUF"
@@ -774,11 +786,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     downloadedAt = System.currentTimeMillis()
                                 )
                                 chatRepository.saveDownloadedModel(entity)
-                                val isDiffusionWeight = entity.format.lowercase() in setOf("safetensors", "ckpt")
-                                if (isDiffusionWeight) {
+                                val isImageWeight = LocalDreamCatalog.isImageModelFormat(entity.format)
+                                if (isImageWeight) {
                                     settingsRepository.updateActiveImageModelId(entity.id)
+                                    if (LocalDreamCatalog.isLocalDreamFormat(entity.format)) {
+                                        settingsRepository.updateImageGenMode(ImageGenBackendMode.LOCAL_DREAM_NPU)
+                                    }
                                     _modelHubState.update {
-                                        it.copy(statusMessage = "Downloaded diffusion checkpoint ${modelFile.fileName} (ready in Image Studio)")
+                                        it.copy(statusMessage = "Downloaded image model ${modelFile.fileName} (ready in Image Studio)")
                                     }
                                 } else {
                                     settingsRepository.updateActiveLocalModelId(entity.id)
@@ -817,8 +832,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun activateDownloadedModel(model: DownloadedModelEntity) {
         viewModelScope.launch {
-            if (model.format.lowercase() in setOf("safetensors", "ckpt")) {
+            if (LocalDreamCatalog.isImageModelFormat(model.format)) {
                 settingsRepository.updateActiveImageModelId(model.id)
+                if (LocalDreamCatalog.isLocalDreamFormat(model.format)) {
+                    settingsRepository.updateImageGenMode(ImageGenBackendMode.LOCAL_DREAM_NPU)
+                }
                 _uiNotice.value = "Selected ${model.displayName} for Image Studio"
                 return@launch
             }
@@ -848,9 +866,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val result = chatRepository.importLocalModel(getApplication<Application>().contentResolver, uri)
             result.fold(
                 onSuccess = { entity ->
-                    if (entity.format.lowercase() in setOf("safetensors", "ckpt")) {
+                    if (LocalDreamCatalog.isImageModelFormat(entity.format)) {
                         settingsRepository.updateActiveImageModelId(entity.id)
-                        _modelHubState.update { it.copy(statusMessage = "Imported diffusion model ${entity.fileName}") }
+                        if (LocalDreamCatalog.isLocalDreamFormat(entity.format)) {
+                            settingsRepository.updateImageGenMode(ImageGenBackendMode.LOCAL_DREAM_NPU)
+                        }
+                        _modelHubState.update { it.copy(statusMessage = "Imported image model ${entity.fileName}") }
                         _uiNotice.value = "Imported ${entity.fileName} for Image Studio"
                     } else {
                         settingsRepository.updateActiveLocalModelId(entity.id)
@@ -1300,6 +1321,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { settingsRepository.updateImageGenMode(mode) }
     }
 
+    fun updateLocalDreamUrl(url: String) {
+        viewModelScope.launch { settingsRepository.updateLocalDreamUrl(url) }
+    }
+
     fun updateImageServerUrl(url: String) {
         viewModelScope.launch { settingsRepository.updateImageServerUrl(url) }
     }
@@ -1373,23 +1398,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun probeImageServer() {
         val current = settings.value
         if (current.imageGenMode == ImageGenBackendMode.ON_DEVICE_SD_CPP) return
+        val targetUrl = if (current.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
+            current.localDreamUrl
+        } else {
+            current.imageServerUrl
+        }
         viewModelScope.launch {
             imageStudioHolder.update { it.copy(isProbingServer = true, serverStatus = null) }
             val result = localImageGenerator.probeServerModels(
                 mode = current.imageGenMode,
-                serverUrl = current.imageServerUrl,
+                serverUrl = targetUrl,
                 apiKey = current.imageServerApiKey
             )
             result.fold(
                 onSuccess = { models ->
+                    val statusLabel = if (current.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
+                        "Local Dream online ($targetUrl) · ${models.firstOrNull() ?: "Ready"}"
+                    } else {
+                        "Connected · ${models.size} checkpoint(s) found"
+                    }
                     imageStudioHolder.update {
                         it.copy(
                             isProbingServer = false,
                             serverModels = models,
-                            serverStatus = "Connected · ${models.size} checkpoint(s) found"
+                            serverStatus = statusLabel
                         )
                     }
-                    if (current.imageServerModel.isBlank() && models.isNotEmpty()) {
+                    if (current.imageServerModel.isBlank() && models.isNotEmpty() &&
+                        current.imageGenMode != ImageGenBackendMode.LOCAL_DREAM_NPU
+                    ) {
                         settingsRepository.updateImageServerModel(models.first())
                     }
                 },
@@ -1408,6 +1445,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun stopImageGeneration() {
         imageGenJob?.cancel()
         imageGenJob = null
+        if (settings.value.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
+            viewModelScope.launch {
+                localImageGenerator.stopLocalDreamServer(settings.value.localDreamUrl)
+            }
+        }
         imageStudioHolder.update { it.copy(isGenerating = false, progressLabel = null) }
     }
 
@@ -1463,7 +1505,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val allDownloaded = downloadedModels.value.filter { File(it.localPath).exists() }
         val diffusionCandidates = allDownloaded.filter {
             val ext = it.format.lowercase()
-            ext == "safetensors" || ext == "ckpt" || (ext == "gguf" && isLikelyDiffusionName(it.fileName))
+            LocalDreamCatalog.isImageModelFormat(ext) || (ext == "gguf" && isLikelyDiffusionName(it.fileName))
         }
         val selectedDiffusion = allDownloaded.firstOrNull { it.id == currentSettings.activeImageModelId }
             ?: diffusionCandidates.firstOrNull()
@@ -1477,6 +1519,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         return try {
+            val effectiveServerUrl = if (currentSettings.imageGenMode == ImageGenBackendMode.LOCAL_DREAM_NPU) {
+                currentSettings.localDreamUrl
+            } else {
+                currentSettings.imageServerUrl
+            }
             val req = ImageGenRequest(
                 mode = currentSettings.imageGenMode,
                 prompt = prompt,
@@ -1488,7 +1535,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 seed = seedOverride,
                 localModelPath = selectedDiffusion?.localPath,
                 localModelName = selectedDiffusion?.displayName.orEmpty(),
-                serverUrl = currentSettings.imageServerUrl,
+                serverUrl = effectiveServerUrl,
                 serverApiKey = currentSettings.imageServerApiKey,
                 serverModel = currentSettings.imageServerModel,
                 hardwareBackend = currentSettings.localBackend,
@@ -1649,10 +1696,73 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiNotice.value = "Image attached to chat composer"
     }
 
+    // --- GitHub Releases Auto-Update System ---
+
+    fun updateGitHubUpdateRepo(repo: String) {
+        viewModelScope.launch {
+            settingsRepository.updateGitHubUpdateRepo(repo)
+        }
+    }
+
+    fun updateAutoCheckUpdates(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.updateAutoCheckUpdates(enabled)
+        }
+    }
+
+    fun dismissUpdateTag(tag: String) {
+        viewModelScope.launch {
+            settingsRepository.updateDismissedUpdateTag(tag)
+        }
+    }
+
+    fun checkForGitHubUpdates(repoOverride: String? = null, silent: Boolean = false) {
+        val rawRepo = (repoOverride ?: settings.value.githubUpdateRepo).trim()
+        if (rawRepo.isBlank()) {
+            if (!silent) {
+                _updateState.value = UpdateCheckState.Error(
+                    "Enter a GitHub repository (owner/repo) first."
+                )
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            val normalized = GitHubUpdateManager.normalizeRepoSlug(rawRepo)
+            if (normalized != null && normalized != settings.value.githubUpdateRepo) {
+                settingsRepository.updateGitHubUpdateRepo(normalized)
+            }
+            _updateState.value = UpdateCheckState.Checking
+            val result = githubUpdateManager.checkLatestRelease(rawRepo)
+            result.fold(
+                onSuccess = { release ->
+                    if (release.isNewer) {
+                        _updateState.value = UpdateCheckState.UpdateAvailable(release)
+                    } else {
+                        _updateState.value = UpdateCheckState.UpToDate(
+                            currentVersion = BuildConfig.VERSION_NAME,
+                            latestTag = release.tagName,
+                            htmlUrl = release.htmlUrl
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    if (silent) {
+                        _updateState.value = UpdateCheckState.Idle
+                    } else {
+                        _updateState.value = UpdateCheckState.Error(
+                            err.localizedMessage ?: "Failed to check GitHub Releases."
+                        )
+                    }
+                }
+            )
+        }
+    }
+
     private fun isLikelyDiffusionName(name: String): Boolean {
         val l = name.lowercase()
         return l.contains("sd") || l.contains("diffusion") || l.contains("flux") ||
             l.contains("dreamshaper") || l.contains("pony") || l.contains("juggernaut") ||
-            l.contains("turbo") || l.contains("xl")
+            l.contains("turbo") || l.contains("xl") || l.contains("qnn") || l.contains("mnn")
     }
 }

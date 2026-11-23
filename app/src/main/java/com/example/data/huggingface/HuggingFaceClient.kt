@@ -163,6 +163,7 @@ class HuggingFaceClient(private val context: Context) {
                     throw IOException("HTTP ${response.code}$hint")
                 }
 
+                val isLocalDream = com.example.data.imagegen.LocalDreamCatalog.isLocalDreamRepo(repoId)
                 val array = JSONArray(body)
                 buildList {
                     for (i in 0 until array.length()) {
@@ -173,11 +174,16 @@ class HuggingFaceClient(private val context: Context) {
                         val lower = path.lowercase()
                         val format = when {
                             lower.endsWith(".task") -> "task"
-                            lower.endsWith(".bin") && !lower.contains("pytorch_model") && !lower.contains("training_args") -> "bin"
                             lower.endsWith(".litertlm") -> "litertlm"
                             lower.endsWith(".gguf") -> "gguf"
                             lower.endsWith(".safetensors") -> "safetensors"
                             lower.endsWith(".ckpt") -> "ckpt"
+                            lower.endsWith(".mnn") -> "mnn"
+                            lower.endsWith(".dlc") -> "dlc"
+                            lower.endsWith(".zip") && isLocalDream -> "zip"
+                            lower.endsWith(".bin") && !lower.contains("pytorch_model") && !lower.contains("training_args") -> {
+                                if (isLocalDream) "qnn" else "bin"
+                            }
                             else -> continue
                         }
                         val lfsSize = item.optJSONObject("lfs")?.optLong("size", -1L) ?: -1L
@@ -189,7 +195,9 @@ class HuggingFaceClient(private val context: Context) {
                                 fileName = path.substringAfterLast('/'),
                                 sizeBytes = size,
                                 format = format,
-                                isOnDeviceRunnable = format in setOf("gguf", "litertlm", "task", "bin", "safetensors", "ckpt")
+                                isOnDeviceRunnable = format in setOf(
+                                    "gguf", "litertlm", "task", "bin", "safetensors", "ckpt", "mnn", "dlc", "qnn", "zip"
+                                )
                             )
                         )
                     }

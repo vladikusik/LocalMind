@@ -72,6 +72,7 @@ private fun LocalMindApp(
     val sandboxState by viewModel.sandboxState.collectAsStateWithLifecycle()
     val imageStudioState by viewModel.imageStudioState.collectAsStateWithLifecycle()
     val generatedImages by viewModel.generatedImages.collectAsStateWithLifecycle()
+    val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val uiNotice by viewModel.uiNotice.collectAsStateWithLifecycle()
 
     var currentDestination by rememberSaveable { mutableStateOf(AppDestination.CHAT) }
@@ -107,6 +108,7 @@ private fun LocalMindApp(
                     connectionState = connectionState,
                     storageStats = storageStats,
                     hardwareInfo = viewModel.hardwareInfo,
+                    updateState = updateState,
                     onNavigateBack = { currentDestination = AppDestination.CHAT },
                     onOpenModelHub = { currentDestination = AppDestination.MODEL_HUB },
                     onOpenAgentsMcp = { currentDestination = AppDestination.AGENTS_MCP },
@@ -130,6 +132,9 @@ private fun LocalMindApp(
                         }
                     },
                     onUpdateVoiceLocale = viewModel::updateVoiceLocale,
+                    onUpdateGitHubRepo = viewModel::updateGitHubUpdateRepo,
+                    onUpdateAutoCheckUpdates = viewModel::updateAutoCheckUpdates,
+                    onCheckForUpdates = { repo -> viewModel.checkForGitHubUpdates(repoOverride = repo, silent = false) },
                     onTestConnection = { provider, url, key ->
                         viewModel.refreshConnection(provider, url, key)
                     },
@@ -212,10 +217,15 @@ private fun LocalMindApp(
                         viewModel.searchHuggingFacePreset("diffusion")
                         currentDestination = AppDestination.MODEL_HUB
                     },
+                    onOpenLocalDreamHub = {
+                        viewModel.searchHuggingFacePreset("localdream")
+                        currentDestination = AppDestination.MODEL_HUB
+                    },
                     onImportCheckpointUri = viewModel::importLocalModelFile,
                     onSelectMode = viewModel::updateImageGenMode,
                     onSelectBackend = viewModel::updateLocalBackend,
                     onSelectLocalCheckpoint = viewModel::selectActiveImageModel,
+                    onUpdateLocalDreamUrl = viewModel::updateLocalDreamUrl,
                     onUpdateServerUrl = viewModel::updateImageServerUrl,
                     onUpdateServerModel = viewModel::updateImageServerModel,
                     onProbeServer = viewModel::probeImageServer,

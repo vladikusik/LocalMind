@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -52,6 +53,7 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SmartToy
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -105,6 +107,9 @@ import com.example.data.local.MessageEntity
 import com.example.data.localmodel.LocalInferenceEngine
 import com.example.data.network.ApiProtocol
 import com.example.data.network.ApiProvider
+import com.example.data.updates.GitHubReleaseInfo
+import com.example.data.updates.GitHubUpdateManager
+import com.example.data.updates.UpdateCheckState
 import com.example.ui.components.ChatComposerBar
 import com.example.ui.components.ChatMessageItem
 import com.example.ui.components.EmptyChatWelcome
@@ -147,7 +152,22 @@ fun ChatWorkspaceScreen(
     val streamingOverlay by viewModel.streamingOverlay.collectAsStateWithLifecycle()
     val composerText by viewModel.composerText.collectAsStateWithLifecycle()
     val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
+    val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val uiNotice by viewModel.uiNotice.collectAsStateWithLifecycle()
+
+    val availableUpdate = remember(updateState, settings.dismissedUpdateTag) {
+        val avail = (updateState as? UpdateCheckState.UpdateAvailable)?.release
+        avail?.takeIf { it.tagName != settings.dismissedUpdateTag }
+    }
+
+    val openUpdateDownload: (GitHubReleaseInfo) -> Unit = { release ->
+        val url = release.apkDownloadUrl ?: release.htmlUrl
+        if (GitHubUpdateManager.isTrustedGitHubUrl(url)) {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            }
+        }
+    }
 
     val activeAgentName = remember(agents, settings.activeAgentId) {
         agents.firstOrNull { it.id == settings.activeAgentId }?.name
@@ -302,6 +322,7 @@ fun ChatWorkspaceScreen(
                         providerName = settings.activeProvider.displayName,
                         activeModelLabel = activeModelLabel,
                         activeAgentName = activeAgentName,
+                        availableUpdate = availableUpdate,
                         baseUrl = settings.baseUrl,
                         connectionState = connectionState,
                         messages = messages,
@@ -318,6 +339,8 @@ fun ChatWorkspaceScreen(
                         onOpenImageStudio = onOpenImageStudio,
                         onRunCodeInSandbox = onRunCodeInSandbox,
                         onClearActiveAgent = { viewModel.selectActiveAgent("") },
+                        onDownloadUpdate = openUpdateDownload,
+                        onDismissUpdate = { viewModel.dismissUpdateTag(it) },
                         onOpenSettings = onOpenSettings,
                         onRefreshConnection = { viewModel.refreshConnection() },
                         onComposerChange = viewModel::updateComposerText,
@@ -398,6 +421,7 @@ fun ChatWorkspaceScreen(
                         providerName = settings.activeProvider.displayName,
                         activeModelLabel = activeModelLabel,
                         activeAgentName = activeAgentName,
+                        availableUpdate = availableUpdate,
                         baseUrl = settings.baseUrl,
                         connectionState = connectionState,
                         messages = messages,
@@ -414,6 +438,8 @@ fun ChatWorkspaceScreen(
                         onOpenImageStudio = onOpenImageStudio,
                         onRunCodeInSandbox = onRunCodeInSandbox,
                         onClearActiveAgent = { viewModel.selectActiveAgent("") },
+                        onDownloadUpdate = openUpdateDownload,
+                        onDismissUpdate = { viewModel.dismissUpdateTag(it) },
                         onOpenSettings = onOpenSettings,
                         onRefreshConnection = { viewModel.refreshConnection() },
                         onComposerChange = viewModel::updateComposerText,
@@ -471,6 +497,7 @@ private fun ChatMainScaffold(
     providerName: String,
     activeModelLabel: String,
     activeAgentName: String?,
+    availableUpdate: GitHubReleaseInfo?,
     baseUrl: String,
     connectionState: ConnectionUiState,
     messages: List<MessageEntity>,
@@ -487,6 +514,8 @@ private fun ChatMainScaffold(
     onOpenImageStudio: () -> Unit,
     onRunCodeInSandbox: (language: String, code: String) -> Unit,
     onClearActiveAgent: () -> Unit,
+    onDownloadUpdate: (GitHubReleaseInfo) -> Unit,
+    onDismissUpdate: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onRefreshConnection: () -> Unit,
     onComposerChange: (String) -> Unit,
@@ -733,6 +762,48 @@ private fun ChatMainScaffold(
                 .padding(innerPadding),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // GitHub Release Update Banner
+            if (availableUpdate != null) {
+                LiquidGlassCard(
+                    onClick = { onDownloadUpdate(availableUpdate) },
+                    shape = RoundedCornerShape(50),
+                    tinted = true,
+                    elevated = true,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .testTag("github_update_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SystemUpdate,
+                            contentDescription = null,
+                            tint = studioColors.statusOnline,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = stringResource(R.string.updates_banner_text, availableUpdate.tagName),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        IconButton(
+                            onClick = { onDismissUpdate(availableUpdate.tagName) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = stringResource(R.string.action_cancel),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             // Active Autonomous Agent Liquid Glass Pill Banner
             if (!activeAgentName.isNullOrBlank()) {
                 LiquidGlassCard(
