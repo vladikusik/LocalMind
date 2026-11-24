@@ -8,7 +8,12 @@ enum class LocalInferenceEngine(
     AUTO(
         id = "auto",
         displayName = "Auto (Best Match)",
-        supportedFormats = setOf("gguf", "litertlm", "task", "bin")
+        supportedFormats = setOf("gguf", "litertlm", "task", "bin", "mlc")
+    ),
+    MLC_LLM(
+        id = "mlc_llm",
+        displayName = "MLC-LLM (TVM GPU)",
+        supportedFormats = setOf("mlc")
     ),
     LLAMA_CPP(
         id = "llama_cpp",
@@ -17,7 +22,7 @@ enum class LocalInferenceEngine(
     ),
     LITERT_LM(
         id = "litert_lm",
-        displayName = "LiteRT-LM (QNN NPU)",
+        displayName = "LiteRT-LM (QNN NPU / GPU)",
         supportedFormats = setOf("litertlm", "task")
     ),
     MEDIAPIPE_GENAI(
@@ -40,10 +45,11 @@ enum class LocalInferenceEngine(
                 return preferred
             }
             return when (ext) {
+                "mlc" -> MLC_LLM
                 "gguf" -> LLAMA_CPP
                 "litertlm" -> LITERT_LM
-                // When NPU is selected, route .task models through LiteRT-LM so Qualcomm QNN HTP NPU is used
-                "task" -> if (hardwareBackend == LocalHardwareBackend.NPU) LITERT_LM else MEDIAPIPE_GENAI
+                // Route .task through LiteRT-LM for GPU/NPU hardware acceleration with KV persistence
+                "task" -> if (hardwareBackend != LocalHardwareBackend.CPU) LITERT_LM else MEDIAPIPE_GENAI
                 "bin" -> MEDIAPIPE_GENAI
                 else -> LLAMA_CPP
             }

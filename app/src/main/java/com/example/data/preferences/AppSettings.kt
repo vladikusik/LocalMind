@@ -50,9 +50,13 @@ data class AppSettings(
     val localThreads: Int = 4,
     val localGpuLayers: Int = -1,
     val enableVulkanGpu: Boolean = true,
-    val enableSpeculativeDecoding: Boolean = true,
+    val enableSpeculativeDecoding: Boolean = false,
     val speculativeDraftTokens: Int = 4,
     val speculativeDraftModelId: String = "",
+    val contextWindowSize: Int = 2048,
+    val prefillChunkSize: Int = 512,
+    val enablePersistentKvCache: Boolean = true,
+    val preloadLocalModel: Boolean = true,
     val activeAgentId: String = "",
     val enableBuiltInTools: Boolean = true,
     val huggingFaceToken: String = "",
@@ -113,6 +117,10 @@ class SettingsRepository(private val context: Context) {
         val ENABLE_SPECULATIVE = booleanPreferencesKey("enable_speculative_decoding")
         val SPECULATIVE_DRAFT_TOKENS = intPreferencesKey("speculative_draft_tokens")
         val SPECULATIVE_DRAFT_MODEL_ID = stringPreferencesKey("speculative_draft_model_id")
+        val CONTEXT_WINDOW_SIZE = intPreferencesKey("context_window_size")
+        val PREFILL_CHUNK_SIZE = intPreferencesKey("prefill_chunk_size")
+        val ENABLE_PERSISTENT_KV_CACHE = booleanPreferencesKey("enable_persistent_kv_cache")
+        val PRELOAD_LOCAL_MODEL = booleanPreferencesKey("preload_local_model")
         val ACTIVE_AGENT_ID = stringPreferencesKey("active_agent_id")
         val ENABLE_BUILTIN_TOOLS = booleanPreferencesKey("enable_builtin_tools")
         val HF_TOKEN = stringPreferencesKey("hf_token")
@@ -174,9 +182,13 @@ class SettingsRepository(private val context: Context) {
             localThreads = (prefs[Keys.LOCAL_THREADS] ?: 4).coerceIn(1, 8),
             localGpuLayers = (prefs[Keys.LOCAL_GPU_LAYERS] ?: -1).coerceIn(-1, 99),
             enableVulkanGpu = prefs[Keys.ENABLE_VULKAN_GPU] ?: true,
-            enableSpeculativeDecoding = prefs[Keys.ENABLE_SPECULATIVE] ?: true,
+            enableSpeculativeDecoding = prefs[Keys.ENABLE_SPECULATIVE] ?: false,
             speculativeDraftTokens = (prefs[Keys.SPECULATIVE_DRAFT_TOKENS] ?: 4).coerceIn(1, 8),
             speculativeDraftModelId = prefs[Keys.SPECULATIVE_DRAFT_MODEL_ID] ?: "",
+            contextWindowSize = (prefs[Keys.CONTEXT_WINDOW_SIZE] ?: 2048).coerceIn(1024, 8192),
+            prefillChunkSize = (prefs[Keys.PREFILL_CHUNK_SIZE] ?: 512).coerceIn(128, 1024),
+            enablePersistentKvCache = prefs[Keys.ENABLE_PERSISTENT_KV_CACHE] ?: true,
+            preloadLocalModel = prefs[Keys.PRELOAD_LOCAL_MODEL] ?: true,
             activeAgentId = prefs[Keys.ACTIVE_AGENT_ID] ?: "",
             enableBuiltInTools = prefs[Keys.ENABLE_BUILTIN_TOOLS] ?: true,
             huggingFaceToken = prefs[Keys.HF_TOKEN] ?: "",
@@ -263,6 +275,22 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun updateSpeculativeDraftModelId(modelId: String) {
         context.settingsDataStore.edit { it[Keys.SPECULATIVE_DRAFT_MODEL_ID] = modelId }
+    }
+
+    suspend fun updateContextWindowSize(tokens: Int) {
+        context.settingsDataStore.edit { it[Keys.CONTEXT_WINDOW_SIZE] = tokens.coerceIn(1024, 8192) }
+    }
+
+    suspend fun updatePrefillChunkSize(tokens: Int) {
+        context.settingsDataStore.edit { it[Keys.PREFILL_CHUNK_SIZE] = tokens.coerceIn(128, 1024) }
+    }
+
+    suspend fun updateEnablePersistentKvCache(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.ENABLE_PERSISTENT_KV_CACHE] = enabled }
+    }
+
+    suspend fun updatePreloadLocalModel(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.PRELOAD_LOCAL_MODEL] = enabled }
     }
 
     suspend fun updateActiveAgentId(agentId: String) {

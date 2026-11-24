@@ -36,6 +36,9 @@ sealed interface StreamEvent {
 
     data class Completed(
         val tokensPerSecond: Float?,
-        val modelName: String?
+        val modelName: String?,
+        val ttftMs: Long? = null,
+        val prefillTokensPerSec: Float? = null,
+        val kvCacheReused: Boolean = false
     ) : StreamEvent
 }

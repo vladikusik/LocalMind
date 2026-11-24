@@ -1083,6 +1083,7 @@ private fun ProviderAndModelBottomSheet(
                         val engineBadge = when (resolvedEngine) {
                             LocalInferenceEngine.LLAMA_CPP -> stringResource(R.string.hub_badge_llama_cpp)
                             LocalInferenceEngine.LITERT_LM -> stringResource(R.string.hub_badge_litert_lm)
+                            LocalInferenceEngine.MLC_LLM -> stringResource(R.string.hub_badge_mlc_llm)
                             else -> stringResource(R.string.hub_badge_mediapipe)
                         }
                         LiquidGlassCard(

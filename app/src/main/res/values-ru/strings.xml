@@ -347,4 +347,22 @@
     <string name="settings_speculative_draft_tokens">Количество токенов наперёд</string>
     <string name="settings_speculative_draft_model">Черновая модель (Draft GGUF)</string>
     <string name="settings_speculative_auto_mtp">Авто (MTP-голова)</string>
+
+    <!-- MLC Chat Integration & Runtime Performance Tuning -->
+    <string name="engine_mlc_llm">MLC-LLM (TVM)</string>
+    <string name="hub_preset_mlc">MLC Chat (GPU)</string>
+    <string name="hub_badge_mlc_llm">MLC · TVM GPU</string>
+    <string name="settings_mlc_perf_section_title">Оптимизации производительности (MLC Chat)</string>
+    <string name="settings_context_window_title">Размер контекстного окна</string>
+    <string name="settings_context_window_desc">Бюджет KV-кэша в токенах (меньше окно = быстрее prefill и меньше ОЗУ).</string>
+    <string name="settings_prefill_chunk_title">Размер батча Prefill (Chunk)</string>
+    <string name="settings_prefill_chunk_desc">Токенов за один проход prefill (512 оптимально для мобильных GPU/CPU).</string>
+    <string name="settings_persistent_kv_title">Постоянный KV-кэш диалога</string>
+    <string name="settings_persistent_kv_desc">Сохраняет KV-кэш между сообщениями, чтобы не пересчитывать всю историю чата с нуля (как в MLC Chat).</string>
+    <string name="settings_preload_model_title">Фоновый прогрев модели</string>
+    <string name="settings_preload_model_desc">Загружает активную локальную модель в память/GPU/NPU при запуске для мгновенного первого токена.</string>
+    <string name="settings_preload_now_button">Прогреть активную модель сейчас</string>
+    <string name="settings_gpu_perf_diagnostic_cpu_gguf">Совет по скорости: встроенный llama.cpp (llamatik) выполняет GGUF только на CPU ARM64 NEON. Для максимальной скорости на GPU/NPU уже сейчас выбирайте LiteRT-LM (.litertlm) или подключайте MLC-LLM Server.</string>
+    <string name="settings_mlc_native_status_ready">MLC TVM Native Runtime: Готов (%1$s)</string>
+    <string name="settings_mlc_native_status_server_hint">MLC TVM Native Runtime: не встроен в APK (соберите mlc4j или используйте провайдер MLC-LLM Server на порту 8000).</string>
 </resources>

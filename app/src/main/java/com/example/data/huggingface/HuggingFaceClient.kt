@@ -67,6 +67,8 @@ class HuggingFaceClient(private val context: Context) {
         .followSslRedirects(true)
         .build()
 
+    private val mlcDownloader = com.example.data.mlc.MlcModelPackageDownloader(context)
+
     private val modelsDir: File
         get() = File(context.filesDir, "models").apply { if (!exists()) mkdirs() }
 
@@ -165,13 +167,44 @@ class HuggingFaceClient(private val context: Context) {
 
                 val isLocalDream = com.example.data.imagegen.LocalDreamCatalog.isLocalDreamRepo(repoId)
                 val array = JSONArray(body)
+
+                // Detect MLC Chat compiled bundles (mlc-chat-config.json + params_shard_*.bin)
+                var hasMlcConfig = false
+                var mlcTotalShardBytes = 0L
+                var mlcShardCount = 0
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    val p = item.optString("path").lowercase()
+                    if (p == "mlc-chat-config.json") {
+                        hasMlcConfig = true
+                    } else if (p.startsWith("params_shard_") && p.endsWith(".bin")) {
+                        mlcShardCount++
+                        val lfsSize = item.optJSONObject("lfs")?.optLong("size", -1L) ?: -1L
+                        mlcTotalShardBytes += if (lfsSize > 0L) lfsSize else item.optLong("size", 0L)
+                    }
+                }
+
                 buildList {
+                    if (hasMlcConfig) {
+                        val bundleTitle = "${repoId.substringAfterLast('/')} (${mlcShardCount.coerceAtLeast(1)} shards).mlc"
+                        add(
+                            HfModelFile(
+                                repoId = repoId,
+                                path = "mlc-chat-config.json",
+                                fileName = bundleTitle,
+                                sizeBytes = mlcTotalShardBytes,
+                                format = "mlc",
+                                isOnDeviceRunnable = true
+                            )
+                        )
+                    }
                     for (i in 0 until array.length()) {
                         val item = array.optJSONObject(i) ?: continue
                         if (item.optString("type") != "file") continue
                         val path = item.optString("path")
                         if (path.isBlank()) continue
                         val lower = path.lowercase()
+                        if (hasMlcConfig && lower.startsWith("params_shard_")) continue
                         val format = when {
                             lower.endsWith(".task") -> "task"
                             lower.endsWith(".litertlm") -> "litertlm"
@@ -196,7 +229,7 @@ class HuggingFaceClient(private val context: Context) {
                                 sizeBytes = size,
                                 format = format,
                                 isOnDeviceRunnable = format in setOf(
-                                    "gguf", "litertlm", "task", "bin", "safetensors", "ckpt", "mnn", "dlc", "qnn", "zip"
+                                    "mlc", "gguf", "litertlm", "task", "bin", "safetensors", "ckpt", "mnn", "dlc", "qnn", "zip"
                                 )
                             )
                         )
@@ -212,7 +245,11 @@ class HuggingFaceClient(private val context: Context) {
     fun downloadModelFile(
         modelFile: HfModelFile,
         hfToken: String
-    ): Flow<ModelDownloadProgress> = flow {
+    ): Flow<ModelDownloadProgress> {
+        if (modelFile.format.equals("mlc", ignoreCase = true)) {
+            return mlcDownloader.downloadMlcBundle(modelFile.repoId, hfToken)
+        }
+        return flow {
         val encodedRepo = modelFile.repoId.split('/').joinToString("/") {
             URLEncoder.encode(it, "UTF-8").replace("+", "%20")
         }
@@ -305,6 +342,7 @@ class HuggingFaceClient(private val context: Context) {
             throw e
         }
     }.flowOn(Dispatchers.IO)
+    }
 
     suspend fun importLocalModelUri(
         contentResolver: ContentResolver,
@@ -326,7 +364,9 @@ class HuggingFaceClient(private val context: Context) {
     fun deleteLocalFile(path: String) {
         runCatching {
             val f = File(path)
-            if (f.exists()) f.delete()
+            if (f.exists()) {
+                if (f.isDirectory) f.deleteRecursively() else f.delete()
+            }
         }
     }
 

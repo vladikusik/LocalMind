@@ -347,4 +347,22 @@
     <string name="settings_speculative_draft_tokens">Speculative Draft Lookahead</string>
     <string name="settings_speculative_draft_model">Draft Model (Optional)</string>
     <string name="settings_speculative_auto_mtp">Auto (MTP Head)</string>
+
+    <!-- MLC Chat Integration & Runtime Performance Tuning -->
+    <string name="engine_mlc_llm">MLC-LLM (TVM)</string>
+    <string name="hub_preset_mlc">MLC Chat (GPU)</string>
+    <string name="hub_badge_mlc_llm">MLC · TVM GPU</string>
+    <string name="settings_mlc_perf_section_title">MLC Chat Performance Runtime</string>
+    <string name="settings_context_window_title">Context Window Size</string>
+    <string name="settings_context_window_desc">KV-cache token budget (smaller window = faster prefill and lower RAM).</string>
+    <string name="settings_prefill_chunk_title">Prefill Chunk Size</string>
+    <string name="settings_prefill_chunk_desc">Tokens processed per prefill batch (512 is optimal for mobile GPU/CPU).</string>
+    <string name="settings_persistent_kv_title">Persistent Multi-Turn KV Cache</string>
+    <string name="settings_persistent_kv_desc">Keeps prompt KV-cache warm across follow-up messages so prior turns are not recomputed (MLC Chat style).</string>
+    <string name="settings_preload_model_title">Background Model Preload</string>
+    <string name="settings_preload_model_desc">Warms up the active local model into RAM/GPU/NPU on launch for instant first-token latency.</string>
+    <string name="settings_preload_now_button">Warm Up Active Model Now</string>
+    <string name="settings_gpu_perf_diagnostic_cpu_gguf">Performance note: Bundled llama.cpp (llamatik) runs GGUF on ARM64 NEON CPU only. For maximum hardware GPU/NPU speed right now, use LiteRT-LM (.litertlm) models or connect MLC-LLM Server.</string>
+    <string name="settings_mlc_native_status_ready">MLC TVM Native Runtime: Ready (%1$s)</string>
+    <string name="settings_mlc_native_status_server_hint">MLC TVM Native Runtime: Not bundled in APK (compile mlc4j or use MLC-LLM Server provider on port 8000).</string>
 </resources>

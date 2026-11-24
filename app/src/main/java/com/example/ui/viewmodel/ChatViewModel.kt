@@ -278,6 +278,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var updateDownloadPollJob: Job? = null
     private val downloadJobs = mutableMapOf<String, Job>()
 
+    private var preloadJob: Job? = null
+
     init {
         viewModelScope.launch {
             chatRepository.ensureDefaultAgentsSeeded()
@@ -287,6 +289,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 baseUrlOverride = initial.baseUrl,
                 apiKeyOverride = initial.apiKey
             )
+            if (initial.preloadLocalModel && initial.activeProvider.protocol == ApiProtocol.ON_DEVICE_MEDIAPIPE) {
+                preloadActiveLocalModelIfReady(initial)
+            }
             if (initial.autoCheckUpdates && initial.githubUpdateRepo.isNotBlank()) {
                 checkForGitHubUpdates(repoOverride = initial.githubUpdateRepo, silent = true)
             }
@@ -341,12 +346,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun selectConversation(conversationId: Long) {
         if (_activeConversationId.value != conversationId) {
             stopGeneration()
+            chatRepository.resetOnDeviceConversationCache()
             _activeConversationId.value = conversationId
         }
     }
 
     fun startNewChat() {
         stopGeneration()
+        chatRepository.resetOnDeviceConversationCache()
         _activeConversationId.value = null
         _pendingAttachments.value = emptyList()
     }
@@ -465,6 +472,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (lastMessage.role == "assistant") {
                 chatRepository.deleteMessage(lastMessage.id)
             }
+            chatRepository.resetOnDeviceConversationCache()
             val currentSettings = settings.value
             val localModel = resolveActiveLocalModel(currentSettings)
             val effectiveModel = resolveEffectiveModel(currentSettings, localModel)
@@ -506,11 +514,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 modelName = effectiveModel
             )
 
-            val rawContentBuffer = StringBuilder()
-            val explicitReasoningBuffer = StringBuilder()
+            val rawContentBuffer = StringBuilder(512)
+            val explicitReasoningBuffer = StringBuilder(256)
             var resolvedModelName: String? = effectiveModel.takeIf { it.isNotBlank() }
             var finalTps: Float? = null
-            var lastDbFlushMs = 0L
+            var lastUiFlushMs = 0L
 
             _streamingOverlay.value = StreamingMessageOverlay(
                 messageId = assistantMsgId,
@@ -525,7 +533,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     settings = currentSettings,
                     historyMessages = history,
                     effectiveModel = effectiveModel,
-                    localModel = localModel
+                    localModel = localModel,
+                    conversationId = conversationId
                 )
                     .catch { throwable -> throw throwable }
                     .collect { event ->
@@ -541,37 +550,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     rawContentBuffer.append(event.contentDelta)
                                 }
 
-                                val split = extractThinkingAndAnswer(
-                                    rawContent = rawContentBuffer.toString(),
-                                    explicitReasoning = explicitReasoningBuffer.toString()
-                                )
-
-                                _streamingOverlay.value = StreamingMessageOverlay(
-                                    messageId = assistantMsgId,
-                                    content = split.answer,
-                                    thinkingContent = split.thinking,
-                                    isThinkingPhase = split.isStillThinking,
-                                    modelName = resolvedModelName
-                                )
-
+                                // MLC Chat frame-paced UI batching (~20Hz / 50ms): avoids per-token
+                                // Markdown re-parsing & SQLite disk writes that starve mobile CPU/GPU.
                                 val now = System.currentTimeMillis()
-                                if (now - lastDbFlushMs >= 450L) {
-                                    lastDbFlushMs = now
-                                    chatRepository.updateMessage(
+                                if (now - lastUiFlushMs >= 48L || rawContentBuffer.length <= 16) {
+                                    lastUiFlushMs = now
+                                    val split = extractThinkingAndAnswer(
+                                        rawContent = rawContentBuffer.toString(),
+                                        explicitReasoning = explicitReasoningBuffer.toString()
+                                    )
+                                    _streamingOverlay.value = StreamingMessageOverlay(
                                         messageId = assistantMsgId,
                                         content = split.answer,
                                         thinkingContent = split.thinking,
-                                        modelName = resolvedModelName,
-                                        isError = false,
-                                        tokensPerSecond = null
+                                        isThinkingPhase = split.isStillThinking,
+                                        modelName = resolvedModelName
                                     )
                                 }
                             }
 
                             is StreamEvent.Completed -> {
                                 finalTps = event.tokensPerSecond
-                                if (!event.modelName.isNullOrBlank()) {
-                                    resolvedModelName = event.modelName
+                                val baseName = event.modelName?.takeIf { it.isNotBlank() } ?: resolvedModelName
+                                resolvedModelName = if (event.ttftMs != null && event.ttftMs > 0L && baseName != null) {
+                                    "$baseName · TTFT ${event.ttftMs}ms"
+                                } else {
+                                    baseName
                                 }
                             }
                         }
@@ -669,6 +673,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val (author, query) = when (preset) {
             "gguf" -> null to "Qwen2.5-1.5B-Instruct-GGUF"
             "litert" -> "litert-community" to ""
+            "mlc" -> com.example.data.mlc.MlcModelCatalog.HF_AUTHOR to "q4f16_1-MLC"
             "localdream" -> LocalDreamCatalog.HF_AUTHOR to ""
             "diffusion" -> null to "stable-diffusion-v1-5 safetensors"
             "gemma" -> null to "gemma-3 GGUF"
@@ -859,10 +864,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             settingsRepository.updateActiveLocalModelId(model.id)
             settingsRepository.updateActiveProvider(ApiProvider.ON_DEVICE)
+            chatRepository.resetOnDeviceConversationCache()
             _connectionState.value = ConnectionUiState.Connected(
                 models = listOf(model.displayName),
                 latencyMs = 0L
             )
+            val current = settings.value
+            if (current.preloadLocalModel) {
+                preloadActiveLocalModelIfReady(current.copy(activeLocalModelId = model.id, activeProvider = ApiProvider.ON_DEVICE))
+            }
         }
     }
 
@@ -986,6 +996,58 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateSpeculativeDraftModelId(modelId: String) {
         viewModelScope.launch { settingsRepository.updateSpeculativeDraftModelId(modelId) }
+    }
+
+    fun updateContextWindowSize(tokens: Int) {
+        viewModelScope.launch {
+            settingsRepository.updateContextWindowSize(tokens)
+            chatRepository.resetOnDeviceConversationCache()
+        }
+    }
+
+    fun updatePrefillChunkSize(tokens: Int) {
+        viewModelScope.launch { settingsRepository.updatePrefillChunkSize(tokens) }
+    }
+
+    fun updateEnablePersistentKvCache(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.updateEnablePersistentKvCache(enabled)
+            if (!enabled) chatRepository.resetOnDeviceConversationCache()
+        }
+    }
+
+    fun updatePreloadLocalModel(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.updatePreloadLocalModel(enabled)
+            if (enabled) preloadActiveLocalModelIfReady(settings.value)
+        }
+    }
+
+    fun preloadActiveLocalModelNow() {
+        val current = settings.value
+        preloadActiveLocalModelIfReady(current, showNotice = true)
+    }
+
+    private fun preloadActiveLocalModelIfReady(
+        currentSettings: AppSettings,
+        showNotice: Boolean = false
+    ) {
+        preloadJob?.cancel()
+        preloadJob = viewModelScope.launch {
+            val localModel = resolveActiveLocalModel(
+                currentSettings.copy(activeProvider = ApiProvider.ON_DEVICE)
+            ) ?: return@launch
+            if (showNotice) {
+                _uiNotice.value = "Warming up ${localModel.displayName}…"
+            }
+            val result = chatRepository.preloadOnDeviceModel(currentSettings, localModel)
+            if (showNotice) {
+                result.fold(
+                    onSuccess = { backend -> _uiNotice.value = "${localModel.displayName} ready ($backend)" },
+                    onFailure = { err -> _uiNotice.value = err.localizedMessage ?: "Preload failed" }
+                )
+            }
+        }
     }
 
     fun updateHuggingFaceToken(token: String) {

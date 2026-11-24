@@ -347,4 +347,22 @@
     <string name="settings_speculative_draft_tokens">Кількість токенів наперед</string>
     <string name="settings_speculative_draft_model">Чернеткова модель (Draft GGUF)</string>
     <string name="settings_speculative_auto_mtp">Авто (MTP-голова)</string>
+
+    <!-- MLC Chat Integration & Runtime Performance Tuning -->
+    <string name="engine_mlc_llm">MLC-LLM (TVM)</string>
+    <string name="hub_preset_mlc">MLC Chat (GPU)</string>
+    <string name="hub_badge_mlc_llm">MLC · TVM GPU</string>
+    <string name="settings_mlc_perf_section_title">Оптимізації продуктивності (MLC Chat)</string>
+    <string name="settings_context_window_title">Розмір контекстного вікна</string>
+    <string name="settings_context_window_desc">Бюджет KV-кешу в токенах (менше вікно = швидший prefill і менше ОЗП).</string>
+    <string name="settings_prefill_chunk_title">Розмір батчу Prefill (Chunk)</string>
+    <string name="settings_prefill_chunk_desc">Токенів за один прохід prefill (512 оптимально для мобільних GPU/CPU).</string>
+    <string name="settings_persistent_kv_title">Постійний KV-кеш діалогу</string>
+    <string name="settings_persistent_kv_desc">Зберігає KV-кеш між повідомленнями, щоб не перераховувати всю історію чату з нуля (як у MLC Chat).</string>
+    <string name="settings_preload_model_title">Фоновий прогрів моделі</string>
+    <string name="settings_preload_model_desc">Завантажує активну локальну модель у пам’ять/GPU/NPU при старті для миттєвого першого токена.</string>
+    <string name="settings_preload_now_button">Прогріти активну модель зараз</string>
+    <string name="settings_gpu_perf_diagnostic_cpu_gguf">Порада щодо швидкості: вбудований llama.cpp (llamatik) виконує GGUF лише на CPU ARM64 NEON. Для максимальної швидкості на GPU/NPU вже зараз обирайте LiteRT-LM (.litertlm) або підключайте MLC-LLM Server.</string>
+    <string name="settings_mlc_native_status_ready">MLC TVM Native Runtime: Готовий (%1$s)</string>
+    <string name="settings_mlc_native_status_server_hint">MLC TVM Native Runtime: не вшитий у APK (зберіть mlc4j або використовуйте провайдер MLC-LLM Server на порту 8000).</string>
 </resources>

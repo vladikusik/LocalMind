@@ -278,6 +278,7 @@ fun ModelHubScreen(
                                     LocalInferenceEngine.AUTO to stringResource(R.string.engine_auto),
                                     LocalInferenceEngine.LLAMA_CPP to stringResource(R.string.engine_llama_cpp),
                                     LocalInferenceEngine.LITERT_LM to stringResource(R.string.engine_litert_lm),
+                                    LocalInferenceEngine.MLC_LLM to stringResource(R.string.engine_mlc_llm),
                                     LocalInferenceEngine.MEDIAPIPE_GENAI to stringResource(R.string.engine_mediapipe)
                                 )
                                 FlowRow(
@@ -518,8 +519,9 @@ fun ModelHubScreen(
                             }
 
                             val presets = listOf(
-                                "gguf" to stringResource(R.string.hub_preset_gguf),
                                 "litert" to stringResource(R.string.hub_preset_litert),
+                                "mlc" to stringResource(R.string.hub_preset_mlc),
+                                "gguf" to stringResource(R.string.hub_preset_gguf),
                                 "localdream" to stringResource(R.string.hub_preset_local_dream),
                                 "diffusion" to stringResource(R.string.hub_preset_diffusion),
                                 "qwen" to stringResource(R.string.hub_preset_qwen),
@@ -616,6 +618,8 @@ private fun DownloadedModelRow(
     val engineBadge = when {
         model.format.lowercase() in setOf("mnn", "dlc", "qnn", "zip") -> stringResource(R.string.hub_badge_local_dream)
         model.format.lowercase() in setOf("safetensors", "ckpt") -> stringResource(R.string.hub_badge_diffusion)
+        model.format.equals("mlc", ignoreCase = true) || resolvedEngine == LocalInferenceEngine.MLC_LLM ->
+            stringResource(R.string.hub_badge_mlc_llm)
         resolvedEngine == LocalInferenceEngine.LLAMA_CPP -> stringResource(R.string.hub_badge_llama_cpp)
         resolvedEngine == LocalInferenceEngine.LITERT_LM -> stringResource(R.string.hub_badge_litert_lm)
         else -> stringResource(R.string.hub_badge_mediapipe)
@@ -886,6 +890,7 @@ private fun HfRepositoryCard(
                                 val badgeLabel = when (file.format.lowercase()) {
                                     "mnn", "dlc", "qnn", "zip" -> stringResource(R.string.hub_badge_local_dream)
                                     "safetensors", "ckpt" -> stringResource(R.string.hub_badge_diffusion)
+                                    "mlc" -> stringResource(R.string.hub_badge_mlc_llm)
                                     "gguf" -> stringResource(R.string.hub_badge_llama_cpp)
                                     "litertlm" -> stringResource(R.string.hub_badge_litert_lm)
                                     else -> stringResource(R.string.hub_badge_mediapipe)

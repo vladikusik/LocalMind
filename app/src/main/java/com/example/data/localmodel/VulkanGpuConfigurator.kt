@@ -74,9 +74,9 @@ object VulkanGpuConfigurator {
             emptyList()
         }
         val hasBundledVulkanBackend = nativeFiles.any { name ->
-            name.contains("vulkan", ignoreCase = true) ||
+            name.contains("ggml-vulkan", ignoreCase = true) ||
                 name.contains("ggml-vk", ignoreCase = true) ||
-                name.contains("llama", ignoreCase = true)
+                name.contains("ggml-opencl", ignoreCase = true)
         }
 
         val shaderCacheDir = File(context.cacheDir, "vulkan_shader_cache").apply {

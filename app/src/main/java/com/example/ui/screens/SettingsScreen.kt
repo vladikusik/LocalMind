@@ -145,6 +145,11 @@ fun SettingsScreen(
     onUpdateEnableSpeculativeDecoding: (Boolean) -> Unit,
     onUpdateSpeculativeDraftTokens: (Int) -> Unit,
     onUpdateSpeculativeDraftModelId: (String) -> Unit,
+    onUpdateContextWindowSize: (Int) -> Unit,
+    onUpdatePrefillChunkSize: (Int) -> Unit,
+    onUpdateEnablePersistentKvCache: (Boolean) -> Unit,
+    onUpdatePreloadLocalModel: (Boolean) -> Unit,
+    onPreloadModelNow: () -> Unit,
     onUpdateSystemPrompt: (String) -> Unit,
     onUpdateTemperature: (Float) -> Unit,
     onUpdateMaxTokens: (Int) -> Unit,
@@ -350,6 +355,7 @@ fun SettingsScreen(
                             LocalInferenceEngine.AUTO to stringResource(R.string.engine_auto),
                             LocalInferenceEngine.LLAMA_CPP to stringResource(R.string.engine_llama_cpp),
                             LocalInferenceEngine.LITERT_LM to stringResource(R.string.engine_litert_lm),
+                            LocalInferenceEngine.MLC_LLM to stringResource(R.string.engine_mlc_llm),
                             LocalInferenceEngine.MEDIAPIPE_GENAI to stringResource(R.string.engine_mediapipe)
                         )
                         FlowRow(
@@ -466,6 +472,28 @@ fun SettingsScreen(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
                                 )
+                                Text(
+                                    text = if (hardwareInfo.mlcNativeReady) {
+                                        stringResource(R.string.settings_mlc_native_status_ready, hardwareInfo.mlcGpuBackend)
+                                    } else {
+                                        stringResource(R.string.settings_mlc_native_status_server_hint)
+                                    },
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = JetBrainsMonoFontFamily
+                                    ),
+                                    color = if (hardwareInfo.mlcNativeReady) {
+                                        studioColors.statusOnline
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                )
+                                if (!hardwareInfo.ggufVulkanBundled) {
+                                    Text(
+                                        text = stringResource(R.string.settings_gpu_perf_diagnostic_cpu_gguf),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = studioColors.statusWarning
+                                    )
+                                }
                             }
                         }
 
@@ -682,6 +710,165 @@ fun SettingsScreen(
                                 }
                             }
                         }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+
+                        // MLC Chat Performance Runtime (KV Cache, Context Window, Prefill Chunk, Preload)
+                        Text(
+                            text = stringResource(R.string.settings_mlc_perf_section_title),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+
+                        // Context Window Size chips
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.settings_context_window_title),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "${settings.contextWindowSize} tok",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Text(
+                                text = stringResource(R.string.settings_context_window_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(1024, 2048, 4096, 8192).forEach { window ->
+                                    FilterChip(
+                                        selected = settings.contextWindowSize == window,
+                                        onClick = { onUpdateContextWindowSize(window) },
+                                        label = { Text("$window", style = MaterialTheme.typography.labelMedium) },
+                                        modifier = Modifier.testTag("settings_context_window_$window")
+                                    )
+                                }
+                            }
+                        }
+
+                        // Prefill Chunk Size chips
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.settings_prefill_chunk_title),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "${settings.prefillChunkSize} tok",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Text(
+                                text = stringResource(R.string.settings_prefill_chunk_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(128, 256, 512, 1024).forEach { chunk ->
+                                    FilterChip(
+                                        selected = settings.prefillChunkSize == chunk,
+                                        onClick = { onUpdatePrefillChunkSize(chunk) },
+                                        label = { Text("$chunk", style = MaterialTheme.typography.labelMedium) },
+                                        modifier = Modifier.testTag("settings_prefill_chunk_$chunk")
+                                    )
+                                }
+                            }
+                        }
+
+                        // Persistent Multi-Turn KV Cache toggle
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.settings_persistent_kv_title),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = stringResource(R.string.settings_persistent_kv_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.enablePersistentKvCache,
+                                onCheckedChange = onUpdateEnablePersistentKvCache,
+                                modifier = Modifier.testTag("settings_persistent_kv_switch")
+                            )
+                        }
+
+                        // Background Model Preload toggle
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.settings_preload_model_title),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = stringResource(R.string.settings_preload_model_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.preloadLocalModel,
+                                onCheckedChange = onUpdatePreloadLocalModel,
+                                modifier = Modifier.testTag("settings_preload_model_switch")
+                            )
+                        }
+
+                        if (settings.activeLocalModelId.isNotBlank()) {
+                            FilledTonalButton(
+                                onClick = onPreloadModelNow,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("settings_preload_now_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Bolt,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.settings_preload_now_button))
+                            }
+                        }
                     }
 
                     // 3. Endpoint & Credentials Card (hidden for On-Device)
@@ -708,8 +895,12 @@ fun SettingsScreen(
                                     .testTag("settings_server_url_input")
                             )
 
-                            if (provider == ApiProvider.LM_STUDIO || provider == ApiProvider.OLLAMA) {
-                                val port = if (provider == ApiProvider.OLLAMA) "11434" else "1234"
+                            if (provider == ApiProvider.LM_STUDIO || provider == ApiProvider.OLLAMA || provider == ApiProvider.MLC_LLM_SERVER) {
+                                val port = when (provider) {
+                                    ApiProvider.OLLAMA -> "11434"
+                                    ApiProvider.MLC_LLM_SERVER -> "8000"
+                                    else -> "1234"
+                                }
                                 Text(
                                     text = stringResource(R.string.settings_presets_label),
                                     style = MaterialTheme.typography.labelMedium,

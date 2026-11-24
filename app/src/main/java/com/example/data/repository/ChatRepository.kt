@@ -294,7 +294,8 @@ class ChatRepository(
         settings: AppSettings,
         historyMessages: List<MessageEntity>,
         effectiveModel: String,
-        localModel: DownloadedModelEntity?
+        localModel: DownloadedModelEntity?,
+        conversationId: Long = 0L
     ): Flow<StreamEvent> = flow {
         val conversationDtos = historyMessages
             .filter { !it.isError && (it.content.isNotBlank() || !it.attachmentsJson.isNullOrBlank()) }
@@ -323,7 +324,7 @@ class ChatRepository(
                 if (localModel == null) {
                     flow {
                         throw IllegalStateException(
-                            "No on-device model selected. Open Hugging Face Models Hub to download a GGUF (llama.cpp), .litertlm, or .task model."
+                            "No on-device model selected. Open Hugging Face Models Hub to download a GGUF (llama.cpp), .litertlm, MLC, or .task model."
                         )
                     }
                 } else {
@@ -339,7 +340,11 @@ class ChatRepository(
                         enableVulkanGpu = settings.enableVulkanGpu,
                         enableSpeculativeDecoding = settings.enableSpeculativeDecoding,
                         speculativeDraftTokens = settings.speculativeDraftTokens,
-                        speculativeDraftModelPath = draftModelPath
+                        speculativeDraftModelPath = draftModelPath,
+                        contextWindowSize = settings.contextWindowSize,
+                        prefillChunkSize = settings.prefillChunkSize,
+                        enablePersistentKvCache = settings.enablePersistentKvCache,
+                        conversationKey = "conv_$conversationId"
                     )
                 }
             } else {
@@ -405,7 +410,11 @@ class ChatRepository(
                 gpuLayers = settings.localGpuLayers,
                 enableVulkanGpu = settings.enableVulkanGpu,
                 enableSpeculativeDecoding = settings.enableSpeculativeDecoding,
-                speculativeDraftTokens = settings.speculativeDraftTokens
+                speculativeDraftTokens = settings.speculativeDraftTokens,
+                contextWindowSize = settings.contextWindowSize,
+                prefillChunkSize = settings.prefillChunkSize,
+                enablePersistentKvCache = false,
+                conversationKey = "direct_${System.nanoTime()}"
             )
         }
 
@@ -494,6 +503,24 @@ class ChatRepository(
                 appendLine()
             }
         }
+    }
+
+    suspend fun preloadOnDeviceModel(
+        settings: AppSettings,
+        localModel: DownloadedModelEntity
+    ): Result<String> = onDeviceEngine.preloadModel(
+        model = localModel,
+        preferredEngine = settings.localEngine,
+        hardwareBackend = settings.localBackend,
+        threads = settings.localThreads,
+        gpuLayers = settings.localGpuLayers,
+        enableVulkanGpu = settings.enableVulkanGpu,
+        contextWindowSize = settings.contextWindowSize,
+        prefillChunkSize = settings.prefillChunkSize
+    )
+
+    fun resetOnDeviceConversationCache() {
+        onDeviceEngine.resetConversationCache()
     }
 
     fun releaseOnDeviceEngine() {

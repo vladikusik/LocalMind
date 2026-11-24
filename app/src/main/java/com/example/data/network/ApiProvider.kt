@@ -113,6 +113,20 @@ enum class ApiProvider(
         isFreeTier = false,
         suggestedModels = listOf("llama3.2", "qwen2.5:7b", "deepseek-r1:8b", "gemma3:4b")
     ),
+    MLC_LLM_SERVER(
+        id = "mlc_llm_server",
+        displayName = "MLC-LLM Server",
+        defaultBaseUrl = "http://10.0.2.2:8000/v1",
+        protocol = ApiProtocol.OPENAI_COMPATIBLE,
+        requiresApiKey = false,
+        isLocal = true,
+        isFreeTier = false,
+        suggestedModels = listOf(
+            "HF://mlc-ai/Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+            "HF://mlc-ai/Llama-3.2-3B-Instruct-q4f16_1-MLC",
+            "HF://mlc-ai/gemma-2-2b-it-q4f16_1-MLC"
+        )
+    ),
 
     // --- Cloud APIs ---
     OPENAI(
