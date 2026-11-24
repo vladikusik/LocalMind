@@ -62,9 +62,12 @@ import com.example.data.sandbox.SandboxLogLevel
 import com.example.data.sandbox.SandboxStateHolder
 import com.example.data.sandbox.SandboxUiState
 import com.example.data.sandbox.SqlSandboxRunner
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -73,9 +76,12 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 sealed interface ConnectionUiState {
@@ -90,6 +96,7 @@ sealed interface ConnectionUiState {
     ) : ConnectionUiState
 }
 
+@Immutable
 data class StreamingMessageOverlay(
     val messageId: Long,
     val content: String,
@@ -192,6 +199,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             initialValue = emptyList()
         )
 
+    // Disk existence check runs off the Main UI thread so Compose never blocks on File.exists()
+    val validDownloadedModels: StateFlow<List<DownloadedModelEntity>> = downloadedModels
+        .map { list -> list.filter { File(it.localPath).exists() } }
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
     private val _activeConversationId = MutableStateFlow<Long?>(null)
     val activeConversationId: StateFlow<Long?> = _activeConversationId.asStateFlow()
 
@@ -279,6 +296,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val downloadJobs = mutableMapOf<String, Job>()
 
     private var preloadJob: Job? = null
+    private var modelHubInitialized = false
 
     init {
         viewModelScope.launch {
@@ -289,14 +307,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 baseUrlOverride = initial.baseUrl,
                 apiKeyOverride = initial.apiKey
             )
+            // Stagger background warm-up & update checks so the first UI frame renders instantaneously
             if (initial.preloadLocalModel && initial.activeProvider.protocol == ApiProtocol.ON_DEVICE_MEDIAPIPE) {
+                delay(450L)
                 preloadActiveLocalModelIfReady(initial)
             }
             if (initial.autoCheckUpdates && initial.githubUpdateRepo.isNotBlank()) {
+                delay(900L)
                 checkForGitHubUpdates(repoOverride = initial.githubUpdateRepo, silent = true)
             }
         }
-        searchHuggingFacePreset("gguf")
+    }
+
+    /** Lazy-loads Hugging Face Model Hub results only when the user actually opens Model Hub. */
+    fun ensureModelHubLoaded() {
+        if (modelHubInitialized) return
+        modelHubInitialized = true
+        searchHuggingFacePreset("litert")
     }
 
     override fun onCleared() {
@@ -529,57 +556,60 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             try {
-                chatRepository.streamCompletion(
-                    settings = currentSettings,
-                    historyMessages = history,
-                    effectiveModel = effectiveModel,
-                    localModel = localModel,
-                    conversationId = conversationId
-                )
-                    .catch { throwable -> throw throwable }
-                    .collect { event ->
-                        when (event) {
-                            is StreamEvent.Chunk -> {
-                                if (!event.modelName.isNullOrBlank()) {
-                                    resolvedModelName = event.modelName
-                                }
-                                if (event.reasoningDelta.isNotEmpty()) {
-                                    explicitReasoningBuffer.append(event.reasoningDelta)
-                                }
-                                if (event.contentDelta.isNotEmpty()) {
-                                    rawContentBuffer.append(event.contentDelta)
+                // Keep all token buffering & <think> parsing off the Main UI thread (Dispatchers.Default)
+                withContext(Dispatchers.Default) {
+                    chatRepository.streamCompletion(
+                        settings = currentSettings,
+                        historyMessages = history,
+                        effectiveModel = effectiveModel,
+                        localModel = localModel,
+                        conversationId = conversationId
+                    )
+                        .catch { throwable -> throw throwable }
+                        .collect { event ->
+                            when (event) {
+                                is StreamEvent.Chunk -> {
+                                    if (!event.modelName.isNullOrBlank()) {
+                                        resolvedModelName = event.modelName
+                                    }
+                                    if (event.reasoningDelta.isNotEmpty()) {
+                                        explicitReasoningBuffer.append(event.reasoningDelta)
+                                    }
+                                    if (event.contentDelta.isNotEmpty()) {
+                                        rawContentBuffer.append(event.contentDelta)
+                                    }
+
+                                    // MLC Chat frame-paced UI batching (~20Hz / 50ms): avoids per-token
+                                    // Markdown re-parsing & SQLite disk writes that starve mobile CPU/GPU.
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastUiFlushMs >= 48L || rawContentBuffer.length <= 16) {
+                                        lastUiFlushMs = now
+                                        val split = extractThinkingAndAnswer(
+                                            rawContent = rawContentBuffer.toString(),
+                                            explicitReasoning = explicitReasoningBuffer.toString()
+                                        )
+                                        _streamingOverlay.value = StreamingMessageOverlay(
+                                            messageId = assistantMsgId,
+                                            content = split.answer,
+                                            thinkingContent = split.thinking,
+                                            isThinkingPhase = split.isStillThinking,
+                                            modelName = resolvedModelName
+                                        )
+                                    }
                                 }
 
-                                // MLC Chat frame-paced UI batching (~20Hz / 50ms): avoids per-token
-                                // Markdown re-parsing & SQLite disk writes that starve mobile CPU/GPU.
-                                val now = System.currentTimeMillis()
-                                if (now - lastUiFlushMs >= 48L || rawContentBuffer.length <= 16) {
-                                    lastUiFlushMs = now
-                                    val split = extractThinkingAndAnswer(
-                                        rawContent = rawContentBuffer.toString(),
-                                        explicitReasoning = explicitReasoningBuffer.toString()
-                                    )
-                                    _streamingOverlay.value = StreamingMessageOverlay(
-                                        messageId = assistantMsgId,
-                                        content = split.answer,
-                                        thinkingContent = split.thinking,
-                                        isThinkingPhase = split.isStillThinking,
-                                        modelName = resolvedModelName
-                                    )
-                                }
-                            }
-
-                            is StreamEvent.Completed -> {
-                                finalTps = event.tokensPerSecond
-                                val baseName = event.modelName?.takeIf { it.isNotBlank() } ?: resolvedModelName
-                                resolvedModelName = if (event.ttftMs != null && event.ttftMs > 0L && baseName != null) {
-                                    "$baseName · TTFT ${event.ttftMs}ms"
-                                } else {
-                                    baseName
+                                is StreamEvent.Completed -> {
+                                    finalTps = event.tokensPerSecond
+                                    val baseName = event.modelName?.takeIf { it.isNotBlank() } ?: resolvedModelName
+                                    resolvedModelName = if (event.ttftMs != null && event.ttftMs > 0L && baseName != null) {
+                                        "$baseName · TTFT ${event.ttftMs}ms"
+                                    } else {
+                                        baseName
+                                    }
                                 }
                             }
                         }
-                    }
+                }
 
                 val finalSplit = extractThinkingAndAnswer(
                     rawContent = rawContentBuffer.toString(),

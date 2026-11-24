@@ -122,8 +122,11 @@ import com.example.ui.theme.LocalStudioColors
 import com.example.ui.viewmodel.ChatViewModel
 import com.example.ui.viewmodel.ConnectionUiState
 import com.example.voice.VoiceInputManager
+import com.example.ui.viewmodel.StreamingMessageOverlay
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -143,15 +146,12 @@ fun ChatWorkspaceScreen(
 
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val conversations by viewModel.conversations.collectAsStateWithLifecycle()
-    val downloadedModels by viewModel.downloadedModels.collectAsStateWithLifecycle()
+    val validLocalModels by viewModel.validDownloadedModels.collectAsStateWithLifecycle()
     val agents by viewModel.agents.collectAsStateWithLifecycle()
     val activeConversationId by viewModel.activeConversationId.collectAsStateWithLifecycle()
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
-    val streamingOverlay by viewModel.streamingOverlay.collectAsStateWithLifecycle()
-    val composerText by viewModel.composerText.collectAsStateWithLifecycle()
-    val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val updateDownloadState by viewModel.updateDownloadState.collectAsStateWithLifecycle()
     val uiNotice by viewModel.uiNotice.collectAsStateWithLifecycle()
@@ -269,10 +269,6 @@ fun ChatWorkspaceScreen(
         }
     }
 
-    val validLocalModels = remember(downloadedModels) {
-        downloadedModels.filter { File(it.localPath).exists() }
-    }
-
     val activeLocalModelName = remember(settings.activeLocalModelId, validLocalModels) {
         validLocalModels.firstOrNull { it.id == settings.activeLocalModelId }?.displayName
             ?: validLocalModels.firstOrNull()?.displayName
@@ -324,9 +320,9 @@ fun ChatWorkspaceScreen(
                         baseUrl = settings.baseUrl,
                         connectionState = connectionState,
                         messages = messages,
-                        streamingOverlay = streamingOverlay,
-                        composerText = composerText,
-                        pendingAttachments = pendingAttachments,
+                        streamingOverlayFlow = viewModel.streamingOverlay,
+                        composerTextFlow = viewModel.composerText,
+                        pendingAttachmentsFlow = viewModel.pendingAttachments,
                         voiceState = voiceState,
                         snackbarHostState = snackbarHostState,
                         onOpenModelPicker = { showModelSheet = true },
@@ -423,9 +419,9 @@ fun ChatWorkspaceScreen(
                         baseUrl = settings.baseUrl,
                         connectionState = connectionState,
                         messages = messages,
-                        streamingOverlay = streamingOverlay,
-                        composerText = composerText,
-                        pendingAttachments = pendingAttachments,
+                        streamingOverlayFlow = viewModel.streamingOverlay,
+                        composerTextFlow = viewModel.composerText,
+                        pendingAttachmentsFlow = viewModel.pendingAttachments,
                         voiceState = voiceState,
                         snackbarHostState = snackbarHostState,
                         onOpenModelPicker = { showModelSheet = true },
@@ -510,9 +506,9 @@ private fun ChatMainScaffold(
     baseUrl: String,
     connectionState: ConnectionUiState,
     messages: List<MessageEntity>,
-    streamingOverlay: com.example.ui.viewmodel.StreamingMessageOverlay?,
-    composerText: String,
-    pendingAttachments: List<MessageAttachment>,
+    streamingOverlayFlow: StateFlow<StreamingMessageOverlay?>,
+    composerTextFlow: StateFlow<String>,
+    pendingAttachmentsFlow: StateFlow<List<MessageAttachment>>,
     voiceState: com.example.voice.VoiceUiState,
     snackbarHostState: SnackbarHostState,
     onOpenModelPicker: () -> Unit,
@@ -540,78 +536,6 @@ private fun ChatMainScaffold(
     modifier: Modifier = Modifier
 ) {
     val studioColors = LocalStudioColors.current
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-
-    val displayMessages = remember(messages, streamingOverlay) {
-        if (streamingOverlay == null) {
-            messages
-        } else {
-            messages.map { msg ->
-                if (msg.id == streamingOverlay.messageId) {
-                    msg.copy(
-                        content = streamingOverlay.content,
-                        thinkingContent = streamingOverlay.thinkingContent,
-                        modelName = streamingOverlay.modelName ?: msg.modelName
-                    )
-                } else {
-                    msg
-                }
-            }
-        }
-    }
-
-    val lastAssistantId = remember(displayMessages) {
-        displayMessages.lastOrNull { it.role == "assistant" && !it.isError }?.id
-    }
-
-    // Never fight the user's touch gesture during streaming!
-    // Immediately pause auto-scroll the instant the user scrolls upward.
-    var autoScrollEnabled by remember { mutableStateOf(true) }
-
-    val scrollInterceptConnection = remember {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput && available.y > 1.5f) {
-                    autoScrollEnabled = false
-                }
-                return Offset.Zero
-            }
-        }
-    }
-
-    // Re-enable auto-scroll automatically when the user finishes scrolling down to the very bottom
-    LaunchedEffect(listState.isScrollInProgress, listState.canScrollForward) {
-        if (!listState.isScrollInProgress && !listState.canScrollForward) {
-            autoScrollEnabled = true
-        }
-    }
-
-    val showScrollToBottomPill by remember {
-        derivedStateOf {
-            displayMessages.isNotEmpty() && listState.canScrollForward
-        }
-    }
-
-    var previousMessageCount by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(displayMessages.size) {
-        if (displayMessages.size > previousMessageCount && displayMessages.isNotEmpty()) {
-            autoScrollEnabled = true
-            listState.animateScrollToItem(displayMessages.lastIndex, scrollOffset = Int.MAX_VALUE / 4)
-        }
-        previousMessageCount = displayMessages.size
-    }
-
-    LaunchedEffect(streamingOverlay?.content?.length, streamingOverlay?.thinkingContent?.length) {
-        if (streamingOverlay != null &&
-            autoScrollEnabled &&
-            !listState.isScrollInProgress &&
-            displayMessages.isNotEmpty()
-        ) {
-            listState.scrollToItem(displayMessages.lastIndex, scrollOffset = Int.MAX_VALUE / 4)
-        }
-    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -744,25 +668,20 @@ private fun ChatMainScaffold(
             )
         },
         bottomBar = {
-            Box(
-                modifier = Modifier.fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) {
-                ChatComposerBar(
-                    text = composerText,
-                    pendingAttachments = pendingAttachments,
-                    onTextChange = onComposerChange,
-                    isGenerating = streamingOverlay != null,
-                    voiceState = voiceState,
-                    onSend = { onSendMessage(null) },
-                    onStop = onStopGeneration,
-                    onToggleVoice = onToggleVoice,
-                    onAttachPhoto = onAttachPhoto,
-                    onAttachFile = onAttachFile,
-                    onRemoveAttachment = onRemoveAttachment,
-                    modifier = Modifier.widthIn(max = 820.dp)
-                )
-            }
+            // Isolated composition scope: typing or toggling generating state ONLY recomposes the composer!
+            IsolatedChatComposerHost(
+                composerTextFlow = composerTextFlow,
+                pendingAttachmentsFlow = pendingAttachmentsFlow,
+                streamingOverlayFlow = streamingOverlayFlow,
+                voiceState = voiceState,
+                onTextChange = onComposerChange,
+                onSend = { onSendMessage(null) },
+                onStop = onStopGeneration,
+                onToggleVoice = onToggleVoice,
+                onAttachPhoto = onAttachPhoto,
+                onAttachFile = onAttachFile,
+                onRemoveAttachment = onRemoveAttachment
+            )
         }
     ) { innerPadding ->
         Column(
@@ -855,95 +774,242 @@ private fun ChatMainScaffold(
                 }
             }
 
-            Box(
+            IsolatedChatMessagesPane(
+                providerName = providerName,
+                baseUrl = baseUrl,
+                connectionState = connectionState,
+                messages = messages,
+                streamingOverlayFlow = streamingOverlayFlow,
+                onSendMessage = onSendMessage,
+                onOpenSettings = onOpenSettings,
+                onOpenModelHub = onOpenModelHub,
+                onRefreshConnection = onRefreshConnection,
+                onRegenerate = onRegenerate,
+                onRetryError = onRetryError,
+                onShareText = onShareText,
+                onRunCodeInSandbox = onRunCodeInSandbox,
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
-                contentAlignment = Alignment.TopCenter
-            ) {
-                if (displayMessages.isEmpty()) {
-                    EmptyChatWelcome(
-                        providerName = providerName,
-                        baseUrl = baseUrl,
-                        connectionState = connectionState,
-                        onSelectPrompt = { prompt -> onSendMessage(prompt) },
-                        onOpenSettings = onOpenSettings,
-                        onOpenModelHub = onOpenModelHub,
-                        onRefreshConnection = onRefreshConnection
-                    )
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .fillMaxWidth()
-                            .widthIn(max = 820.dp)
-                            .nestedScroll(scrollInterceptConnection),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        itemsIndexed(
-                            items = displayMessages,
-                            key = { _, item -> item.id }
-                        ) { _, msg ->
-                            val isStreamingThis = streamingOverlay?.messageId == msg.id
-                            ChatMessageItem(
-                                message = msg,
-                                isStreaming = isStreamingThis,
-                                isThinkingPhase = isStreamingThis && (streamingOverlay?.isThinkingPhase == true),
-                                isLastAssistantMessage = msg.id == lastAssistantId,
-                                onRegenerate = onRegenerate,
-                                onRetryError = { onRetryError(msg.id) },
-                                onOpenSettings = onOpenSettings,
-                                onShare = onShareText,
-                                onRunCodeInSandbox = onRunCodeInSandbox
-                            )
-                        }
-                    }
+                    .fillMaxWidth()
+            )
+        }
+    }
+}
 
-                    // Floating Liquid Glass "Scroll to latest" pill when reading older messages
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = showScrollToBottomPill,
-                        enter = fadeIn(),
-                        exit = fadeOut(),
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 12.dp)
-                    ) {
-                        LiquidGlassCard(
-                            onClick = {
-                                autoScrollEnabled = true
-                                scope.launch {
-                                    if (displayMessages.isNotEmpty()) {
-                                        listState.animateScrollToItem(
-                                            displayMessages.lastIndex,
-                                            scrollOffset = Int.MAX_VALUE / 4
-                                        )
-                                    }
-                                }
-                            },
-                            shape = RoundedCornerShape(50),
-                            elevated = true,
-                            modifier = Modifier.testTag("scroll_to_bottom_pill")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.ArrowDownward,
-                                    contentDescription = stringResource(R.string.action_scroll_to_bottom),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = stringResource(R.string.action_scroll_to_bottom),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
+/**
+ * Isolated composer scope so keystrokes never trigger recomposition of the chat list,
+ * TopAppBar, LiquidGlassBackdrop, or HistorySidebarContent.
+ */
+@Composable
+private fun IsolatedChatComposerHost(
+    composerTextFlow: StateFlow<String>,
+    pendingAttachmentsFlow: StateFlow<List<MessageAttachment>>,
+    streamingOverlayFlow: StateFlow<StreamingMessageOverlay?>,
+    voiceState: com.example.voice.VoiceUiState,
+    onTextChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+    onToggleVoice: () -> Unit,
+    onAttachPhoto: () -> Unit,
+    onAttachFile: () -> Unit,
+    onRemoveAttachment: (String) -> Unit
+) {
+    val composerText by composerTextFlow.collectAsStateWithLifecycle()
+    val pendingAttachments by pendingAttachmentsFlow.collectAsStateWithLifecycle()
+    val isGenerating by remember(streamingOverlayFlow) {
+        streamingOverlayFlow.map { it != null }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = streamingOverlayFlow.value != null)
+
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center
+    ) {
+        ChatComposerBar(
+            text = composerText,
+            pendingAttachments = pendingAttachments,
+            onTextChange = onTextChange,
+            isGenerating = isGenerating,
+            voiceState = voiceState,
+            onSend = onSend,
+            onStop = onStop,
+            onToggleVoice = onToggleVoice,
+            onAttachPhoto = onAttachPhoto,
+            onAttachFile = onAttachFile,
+            onRemoveAttachment = onRemoveAttachment,
+            modifier = Modifier.widthIn(max = 820.dp)
+        )
+    }
+}
+
+/**
+ * Isolated message-list scope so 20Hz streaming updates ONLY recompose the active streaming message item
+ * without copying the entire messages list or recomposing older messages/chrome.
+ */
+@Composable
+private fun IsolatedChatMessagesPane(
+    providerName: String,
+    baseUrl: String,
+    connectionState: ConnectionUiState,
+    messages: List<MessageEntity>,
+    streamingOverlayFlow: StateFlow<StreamingMessageOverlay?>,
+    onSendMessage: (String?) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenModelHub: () -> Unit,
+    onRefreshConnection: () -> Unit,
+    onRegenerate: () -> Unit,
+    onRetryError: (Long) -> Unit,
+    onShareText: (String) -> Unit,
+    onRunCodeInSandbox: (language: String, code: String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val streamingOverlay by streamingOverlayFlow.collectAsStateWithLifecycle()
+
+    val lastAssistantId = remember(messages) {
+        messages.lastOrNull { it.role == "assistant" && !it.isError }?.id
+    }
+
+    var autoScrollEnabled by remember { mutableStateOf(true) }
+
+    val scrollInterceptConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y > 1.5f) {
+                    autoScrollEnabled = false
+                }
+                return Offset.Zero
+            }
+        }
+    }
+
+    LaunchedEffect(listState.isScrollInProgress, listState.canScrollForward) {
+        if (!listState.isScrollInProgress && !listState.canScrollForward) {
+            autoScrollEnabled = true
+        }
+    }
+
+    val showScrollToBottomPill by remember {
+        derivedStateOf {
+            messages.isNotEmpty() && listState.canScrollForward
+        }
+    }
+
+    var previousMessageCount by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(messages.size) {
+        if (messages.size > previousMessageCount && messages.isNotEmpty()) {
+            autoScrollEnabled = true
+            listState.animateScrollToItem(messages.lastIndex, scrollOffset = 100_000)
+        }
+        previousMessageCount = messages.size
+    }
+
+    LaunchedEffect(streamingOverlay?.content?.length, streamingOverlay?.thinkingContent?.length) {
+        if (streamingOverlay != null &&
+            autoScrollEnabled &&
+            !listState.isScrollInProgress &&
+            messages.isNotEmpty()
+        ) {
+            listState.scrollToItem(messages.lastIndex, scrollOffset = 100_000)
+        }
+    }
+
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.TopCenter
+    ) {
+        if (messages.isEmpty()) {
+            EmptyChatWelcome(
+                providerName = providerName,
+                baseUrl = baseUrl,
+                connectionState = connectionState,
+                onSelectPrompt = { prompt -> onSendMessage(prompt) },
+                onOpenSettings = onOpenSettings,
+                onOpenModelHub = onOpenModelHub,
+                onRefreshConnection = onRefreshConnection
+            )
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth()
+                    .widthIn(max = 820.dp)
+                    .nestedScroll(scrollInterceptConnection),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                itemsIndexed(
+                    items = messages,
+                    key = { _, item -> item.id }
+                ) { _, rawMsg ->
+                    val overlay = streamingOverlay
+                    val isStreamingThis = overlay != null && overlay.messageId == rawMsg.id
+                    // Zero list-copying: only the single active streaming item merges live text!
+                    val effectiveMsg = if (isStreamingThis && overlay != null) {
+                        rawMsg.copy(
+                            content = overlay.content,
+                            thinkingContent = overlay.thinkingContent,
+                            modelName = overlay.modelName ?: rawMsg.modelName
+                        )
+                    } else {
+                        rawMsg
+                    }
+                    ChatMessageItem(
+                        message = effectiveMsg,
+                        isStreaming = isStreamingThis,
+                        isThinkingPhase = isStreamingThis && (overlay?.isThinkingPhase == true),
+                        isLastAssistantMessage = rawMsg.id == lastAssistantId,
+                        onRegenerate = onRegenerate,
+                        onRetryError = { onRetryError(rawMsg.id) },
+                        onOpenSettings = onOpenSettings,
+                        onShare = onShareText,
+                        onRunCodeInSandbox = onRunCodeInSandbox
+                    )
+                }
+            }
+
+            AnimatedVisibility(
+                visible = showScrollToBottomPill,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 12.dp)
+            ) {
+                LiquidGlassCard(
+                    onClick = {
+                        autoScrollEnabled = true
+                        scope.launch {
+                            if (messages.isNotEmpty()) {
+                                listState.animateScrollToItem(
+                                    messages.lastIndex,
+                                    scrollOffset = 100_000
                                 )
                             }
                         }
+                    },
+                    shape = RoundedCornerShape(50),
+                    elevated = true,
+                    modifier = Modifier.testTag("scroll_to_bottom_pill")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowDownward,
+                            contentDescription = stringResource(R.string.action_scroll_to_bottom),
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = stringResource(R.string.action_scroll_to_bottom),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
                     }
                 }
             }

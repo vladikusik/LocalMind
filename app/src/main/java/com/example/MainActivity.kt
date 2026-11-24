@@ -156,30 +156,35 @@ private fun LocalMindApp(
                     onClearAllHistory = viewModel::clearAllHistory
                 )
 
-                AppDestination.MODEL_HUB -> ModelHubScreen(
-                    hubState = modelHubState,
-                    downloadedModels = downloadedModels,
-                    activeProvider = settings.activeProvider,
-                    activeLocalModelId = settings.activeLocalModelId,
-                    localEngine = settings.localEngine,
-                    localBackend = settings.localBackend,
-                    hardwareInfo = viewModel.hardwareInfo,
-                    huggingFaceToken = settings.huggingFaceToken,
-                    onNavigateBack = { currentDestination = AppDestination.CHAT },
-                    onUpdateLocalEngine = viewModel::updateLocalEngine,
-                    onUpdateLocalBackend = viewModel::updateLocalBackend,
-                    onUpdateSearchQuery = viewModel::updateHfSearchQuery,
-                    onSelectPreset = viewModel::searchHuggingFacePreset,
-                    onSubmitSearch = viewModel::submitHfSearch,
-                    onToggleRepo = viewModel::toggleInspectRepo,
-                    onStartDownload = viewModel::startModelDownload,
-                    onCancelDownload = viewModel::cancelModelDownload,
-                    onActivateDownloaded = viewModel::activateDownloadedModel,
-                    onDeleteDownloaded = viewModel::deleteDownloadedModel,
-                    onImportLocalUri = viewModel::importLocalModelFile,
-                    onUpdateHfToken = viewModel::updateHuggingFaceToken,
-                    onClearStatusMessage = viewModel::clearModelHubStatus
-                )
+                AppDestination.MODEL_HUB -> {
+                    androidx.compose.runtime.LaunchedEffect(Unit) {
+                        viewModel.ensureModelHubLoaded()
+                    }
+                    ModelHubScreen(
+                        hubState = modelHubState,
+                        downloadedModels = downloadedModels,
+                        activeProvider = settings.activeProvider,
+                        activeLocalModelId = settings.activeLocalModelId,
+                        localEngine = settings.localEngine,
+                        localBackend = settings.localBackend,
+                        hardwareInfo = viewModel.hardwareInfo,
+                        huggingFaceToken = settings.huggingFaceToken,
+                        onNavigateBack = { currentDestination = AppDestination.CHAT },
+                        onUpdateLocalEngine = viewModel::updateLocalEngine,
+                        onUpdateLocalBackend = viewModel::updateLocalBackend,
+                        onUpdateSearchQuery = viewModel::updateHfSearchQuery,
+                        onSelectPreset = viewModel::searchHuggingFacePreset,
+                        onSubmitSearch = viewModel::submitHfSearch,
+                        onToggleRepo = viewModel::toggleInspectRepo,
+                        onStartDownload = viewModel::startModelDownload,
+                        onCancelDownload = viewModel::cancelModelDownload,
+                        onActivateDownloaded = viewModel::activateDownloadedModel,
+                        onDeleteDownloaded = viewModel::deleteDownloadedModel,
+                        onImportLocalUri = viewModel::importLocalModelFile,
+                        onUpdateHfToken = viewModel::updateHuggingFaceToken,
+                        onClearStatusMessage = viewModel::clearModelHubStatus
+                    )
+                }
 
                 AppDestination.AGENTS_MCP -> AgentsMcpScreen(
                     agents = agents,

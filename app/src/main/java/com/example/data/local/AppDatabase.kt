@@ -61,6 +61,17 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val PERFORMANCE_CALLBACK = object : RoomDatabase.Callback() {
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                super.onOpen(db)
+                runCatching {
+                    db.query("PRAGMA synchronous = NORMAL").close()
+                    db.query("PRAGMA temp_store = MEMORY").close()
+                    db.query("PRAGMA cache_size = -8000").close()
+                }
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -68,6 +79,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "localmind_chats.db"
                 )
+                    .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                    .addCallback(PERFORMANCE_CALLBACK)
                     .addMigrations(MIGRATION_4_5)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()

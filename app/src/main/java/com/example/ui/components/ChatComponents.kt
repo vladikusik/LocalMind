@@ -439,15 +439,20 @@ private fun AssistantMessageBlock(
                 val contentToShow = message.content
                 if (contentToShow.isEmpty() && isStreaming) {
                     StreamingDotsIndicator()
+                } else if (isStreaming) {
+                    // Skip SelectionContainer during streaming to avoid SelectionRegistrar
+                    // layout invalidation on every 48ms token batch!
+                    MarkdownText(
+                        markdown = if (!isThinkingPhase) "$contentToShow ▍" else contentToShow,
+                        isStreaming = true,
+                        onRunCodeInSandbox = null
+                    )
                 } else {
                     SelectionContainer {
                         MarkdownText(
-                            markdown = if (isStreaming && !isThinkingPhase) {
-                                "$contentToShow ▍"
-                            } else {
-                                contentToShow
-                            },
-                            onRunCodeInSandbox = if (isStreaming) null else onRunCodeInSandbox
+                            markdown = contentToShow,
+                            isStreaming = false,
+                            onRunCodeInSandbox = onRunCodeInSandbox
                         )
                     }
                 }
@@ -621,6 +626,7 @@ fun ChatComposerBar(
             ) {
                 items(pendingAttachments, key = { it.id }) { att ->
                     if (att.isImage) {
+                        val previewFile = remember(att.localPath) { File(att.localPath) }
                         Box(
                             modifier = Modifier
                                 .size(70.dp)
@@ -628,7 +634,7 @@ fun ChatComposerBar(
                                 .border(1.dp, glass.specularBorderTop, RoundedCornerShape(16.dp))
                         ) {
                             AsyncImage(
-                                model = File(att.localPath),
+                                model = previewFile,
                                 contentDescription = att.displayName,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()

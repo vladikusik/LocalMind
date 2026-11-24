@@ -13,10 +13,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -125,50 +126,42 @@ fun LiquidGlassBackdrop(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(glass.baseGradientTop, glass.baseGradientBottom)
-                    )
-                )
-                .drawBehind {
+                // Cache all 4 GPU gradient shaders once per layout size / theme change
+                // instead of reallocating RadialGradient shaders on every frame redraw.
+                .drawWithCache {
                     val w = size.width
                     val h = size.height
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                glass.orbPrimary.copy(alpha = orbAlphaPrimary),
-                                Color.Transparent
-                            ),
-                            center = Offset(w * 0.14f, h * 0.12f),
-                            radius = w * 0.85f
-                        ),
-                        radius = w * 0.85f,
-                        center = Offset(w * 0.14f, h * 0.12f)
+                    val baseBrush = Brush.verticalGradient(
+                        colors = listOf(glass.baseGradientTop, glass.baseGradientBottom)
                     )
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                glass.orbSecondary.copy(alpha = orbAlphaSecondary),
-                                Color.Transparent
-                            ),
-                            center = Offset(w * 0.92f, h * 0.44f),
-                            radius = w * 0.78f
-                        ),
-                        radius = w * 0.78f,
-                        center = Offset(w * 0.92f, h * 0.44f)
+                    val c1 = Offset(w * 0.14f, h * 0.12f)
+                    val r1 = (w * 0.85f).coerceAtLeast(1f)
+                    val b1 = Brush.radialGradient(
+                        colors = listOf(glass.orbPrimary.copy(alpha = orbAlphaPrimary), Color.Transparent),
+                        center = c1,
+                        radius = r1
                     )
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                glass.orbAccent.copy(alpha = orbAlphaAccent),
-                                Color.Transparent
-                            ),
-                            center = Offset(w * 0.22f, h * 0.92f),
-                            radius = w * 0.72f
-                        ),
-                        radius = w * 0.72f,
-                        center = Offset(w * 0.22f, h * 0.92f)
+                    val c2 = Offset(w * 0.92f, h * 0.44f)
+                    val r2 = (w * 0.78f).coerceAtLeast(1f)
+                    val b2 = Brush.radialGradient(
+                        colors = listOf(glass.orbSecondary.copy(alpha = orbAlphaSecondary), Color.Transparent),
+                        center = c2,
+                        radius = r2
                     )
+                    val c3 = Offset(w * 0.22f, h * 0.92f)
+                    val r3 = (w * 0.72f).coerceAtLeast(1f)
+                    val b3 = Brush.radialGradient(
+                        colors = listOf(glass.orbAccent.copy(alpha = orbAlphaAccent), Color.Transparent),
+                        center = c3,
+                        radius = r3
+                    )
+
+                    onDrawBehind {
+                        drawRect(brush = baseBrush)
+                        drawCircle(brush = b1, radius = r1, center = c1)
+                        drawCircle(brush = b2, radius = r2, center = c2)
+                        drawCircle(brush = b3, radius = r3, center = c3)
+                    }
                 },
             content = content
         )
@@ -192,19 +185,28 @@ fun LiquidGlassCard(
         else -> glass.glassSurface
     }
     val contentColor = MaterialTheme.colorScheme.onSurface
-    val borderBrush = Brush.linearGradient(
-        colors = listOf(
-            glass.specularBorderTop,
-            glass.specularBorderMid,
-            glass.specularBorderBottom
+    // Memoize border and sheen brushes per theme token to avoid per-recomposition allocations
+    val borderStroke = remember(glass, borderWidth) {
+        BorderStroke(
+            width = borderWidth,
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    glass.specularBorderTop,
+                    glass.specularBorderMid,
+                    glass.specularBorderBottom
+                )
+            )
         )
-    )
-    val sheenBrush = Brush.verticalGradient(
-        colors = listOf(
-            glass.innerSheenTop,
-            glass.innerSheenBottom
+    }
+    val sheenBrush = remember(glass) {
+        Brush.verticalGradient(
+            colors = listOf(
+                glass.innerSheenTop,
+                glass.innerSheenBottom
+            )
         )
-    )
+    }
+    val shadow = if (elevated && !glass.isAmoled) 4.dp else 0.dp
 
     if (onClick != null) {
         Surface(
@@ -212,15 +214,11 @@ fun LiquidGlassCard(
             shape = shape,
             color = fillColor,
             contentColor = contentColor,
-            border = BorderStroke(borderWidth, borderBrush),
-            shadowElevation = if (elevated && !glass.isAmoled) 6.dp else 0.dp,
+            border = borderStroke,
+            shadowElevation = shadow,
             modifier = modifier
         ) {
-            Box(
-                modifier = Modifier
-                    .clip(shape)
-                    .background(sheenBrush)
-            ) {
+            Box(modifier = Modifier.background(sheenBrush)) {
                 content()
             }
         }
@@ -229,15 +227,11 @@ fun LiquidGlassCard(
             shape = shape,
             color = fillColor,
             contentColor = contentColor,
-            border = BorderStroke(borderWidth, borderBrush),
-            shadowElevation = if (elevated && !glass.isAmoled) 6.dp else 0.dp,
+            border = borderStroke,
+            shadowElevation = shadow,
             modifier = modifier
         ) {
-            Box(
-                modifier = Modifier
-                    .clip(shape)
-                    .background(sheenBrush)
-            ) {
+            Box(modifier = Modifier.background(sheenBrush)) {
                 content()
             }
         }
@@ -256,23 +250,27 @@ fun Modifier.liquidGlassModifier(
         elevated -> glass.glassSurfaceElevated
         else -> glass.glassSurface
     }
+    val sheenBrush = remember(glass) {
+        Brush.verticalGradient(
+            colors = listOf(glass.innerSheenTop, glass.innerSheenBottom)
+        )
+    }
+    val borderBrush = remember(glass) {
+        Brush.linearGradient(
+            colors = listOf(
+                glass.specularBorderTop,
+                glass.specularBorderMid,
+                glass.specularBorderBottom
+            )
+        )
+    }
     return this
         .clip(shape)
         .background(fillColor)
-        .background(
-            Brush.verticalGradient(
-                colors = listOf(glass.innerSheenTop, glass.innerSheenBottom)
-            )
-        )
+        .background(sheenBrush)
         .border(
             width = 1.dp,
-            brush = Brush.linearGradient(
-                colors = listOf(
-                    glass.specularBorderTop,
-                    glass.specularBorderMid,
-                    glass.specularBorderBottom
-                )
-            ),
+            brush = borderBrush,
             shape = shape
         )
 }

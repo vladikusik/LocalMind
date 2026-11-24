@@ -71,8 +71,50 @@ fun MarkdownText(
     markdown: String,
     modifier: Modifier = Modifier,
     textColor: Color = MaterialTheme.colorScheme.onSurface,
+    isStreaming: Boolean = false,
     onRunCodeInSandbox: ((language: String, code: String) -> Unit)? = null
 ) {
+    if (isStreaming) {
+        // O(1) incremental streaming split: completed blocks before the last paragraph boundary
+        // outside an open code fence are parsed once and cached; only the short active tail reparses!
+        val splitIdx = remember(markdown) { findSafeIncrementalSplitIndex(markdown) }
+        val completedPrefix = remember(markdown, splitIdx) {
+            if (splitIdx > 0) markdown.substring(0, splitIdx) else ""
+        }
+        val activeTail = remember(markdown, splitIdx) {
+            if (splitIdx > 0) markdown.substring(splitIdx) else markdown
+        }
+        val completedBlocks = remember(completedPrefix) {
+            if (completedPrefix.isEmpty()) emptyList() else MarkdownParser.parseBlocks(completedPrefix)
+        }
+        val tailBlocks = remember(activeTail) {
+            if (activeTail.isBlank()) emptyList() else MarkdownParser.parseBlocks(activeTail)
+        }
+
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            completedBlocks.forEach { block ->
+                RenderMarkdownBlock(
+                    block = block,
+                    textColor = textColor,
+                    skipCodeHighlight = false,
+                    onRunCodeInSandbox = null
+                )
+            }
+            tailBlocks.forEachIndexed { idx, block ->
+                RenderMarkdownBlock(
+                    block = block,
+                    textColor = textColor,
+                    skipCodeHighlight = idx == tailBlocks.lastIndex,
+                    onRunCodeInSandbox = null
+                )
+            }
+        }
+        return
+    }
+
     val blocks = remember(markdown) { MarkdownParser.parseBlocks(markdown) }
 
     Column(
@@ -80,27 +122,71 @@ fun MarkdownText(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         blocks.forEach { block ->
-            when (block) {
-                is MarkdownBlock.Heading -> HeadingView(block, textColor)
-                is MarkdownBlock.Paragraph -> InlineMarkdownText(
-                    text = block.text,
-                    style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
-                )
-                is MarkdownBlock.CodeBlock -> CodeBlockCard(
-                    block = block,
-                    onRunInSandbox = onRunCodeInSandbox
-                )
-                is MarkdownBlock.BlockQuote -> BlockQuoteView(block.text, textColor)
-                is MarkdownBlock.UnorderedList -> UnorderedListView(block.items, textColor)
-                is MarkdownBlock.OrderedList -> OrderedListView(block.items, textColor)
-                is MarkdownBlock.Table -> MarkdownTableView(block, textColor)
-                MarkdownBlock.HorizontalRule -> HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant
-                )
-            }
+            RenderMarkdownBlock(
+                block = block,
+                textColor = textColor,
+                skipCodeHighlight = false,
+                onRunCodeInSandbox = onRunCodeInSandbox
+            )
         }
     }
+}
+
+@Composable
+private fun RenderMarkdownBlock(
+    block: MarkdownBlock,
+    textColor: Color,
+    skipCodeHighlight: Boolean,
+    onRunCodeInSandbox: ((language: String, code: String) -> Unit)?
+) {
+    when (block) {
+        is MarkdownBlock.Heading -> HeadingView(block, textColor)
+        is MarkdownBlock.Paragraph -> InlineMarkdownText(
+            text = block.text,
+            style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+        )
+        is MarkdownBlock.CodeBlock -> CodeBlockCard(
+            block = block,
+            skipHighlight = skipCodeHighlight,
+            onRunInSandbox = onRunCodeInSandbox
+        )
+        is MarkdownBlock.BlockQuote -> BlockQuoteView(block.text, textColor)
+        is MarkdownBlock.UnorderedList -> UnorderedListView(block.items, textColor)
+        is MarkdownBlock.OrderedList -> OrderedListView(block.items, textColor)
+        is MarkdownBlock.Table -> MarkdownTableView(block, textColor)
+        MarkdownBlock.HorizontalRule -> HorizontalDivider(
+            modifier = Modifier.padding(vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outlineVariant
+        )
+    }
+}
+
+/**
+ * Finds the last `\n\n` boundary that is NOT inside an open ``` code fence so previously
+ * streamed paragraphs stay immutable and cached instead of re-parsing the full response.
+ */
+private fun findSafeIncrementalSplitIndex(markdown: String): Int {
+    if (markdown.length < 160) return 0
+    var inFence = false
+    var lastSafeSplit = 0
+    var i = 0
+    val len = markdown.length
+    while (i < len) {
+        val lineStart = i
+        var lineEnd = markdown.indexOf('\n', i)
+        if (lineEnd == -1) lineEnd = len
+        // Skip leading spaces for fence detection
+        var p = lineStart
+        while (p < lineEnd && (markdown[p] == ' ' || markdown[p] == '\t')) p++
+        if (p + 2 < lineEnd && markdown[p] == '`' && markdown[p + 1] == '`' && markdown[p + 2] == '`') {
+            inFence = !inFence
+        } else if (!inFence && p == lineEnd && lineEnd + 1 < len) {
+            // Blank line outside a code fence: everything up to lineEnd + 1 is finalized
+            lastSafeSplit = lineEnd + 1
+        }
+        i = lineEnd + 1
+    }
+    return lastSafeSplit
 }
 
 @Composable
@@ -274,6 +360,7 @@ private fun OrderedListView(items: List<Pair<String, String>>, textColor: Color)
 @Composable
 private fun CodeBlockCard(
     block: MarkdownBlock.CodeBlock,
+    skipHighlight: Boolean = false,
     onRunInSandbox: ((language: String, code: String) -> Unit)? = null
 ) {
     val studioColors = LocalStudioColors.current
@@ -291,7 +378,13 @@ private fun CodeBlockCard(
         }
     }
 
-    val highlighted = remember(block.code) { highlightCodeSyntax(block.code, studioColors.codeText) }
+    val highlighted = remember(block.code, skipHighlight, studioColors.codeText) {
+        if (skipHighlight || block.code.length > 16_000) {
+            AnnotatedString(block.code)
+        } else {
+            highlightCodeSyntax(block.code, studioColors.codeText)
+        }
+    }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -494,11 +587,24 @@ private val inlineTokenRegex = Regex(
     """(`[^`]+`)|(\[([^\]]+)\]\((https?://[^)\s]+)\))|(\*\*\*([^*]+)\*\*\*)|(\*\*([^*]+)\*\*)|(__([^_]+)__)|(~~([^~]+)~~)|(\*([^*]+)\*)"""
 )
 
+private fun hasInlineMarkdownTokens(text: String): Boolean {
+    for (i in 0 until text.length) {
+        when (text[i]) {
+            '`', '*', '_', '[', '~' -> return true
+        }
+    }
+    return false
+}
+
 private fun buildInlineAnnotatedString(
     text: String,
     linkColor: Color,
     inlineCodeBg: Color
-): AnnotatedString = buildAnnotatedString {
+): AnnotatedString {
+    if (!hasInlineMarkdownTokens(text)) {
+        return AnnotatedString(text)
+    }
+    return buildAnnotatedString {
     var cursor = 0
     for (match in inlineTokenRegex.findAll(text)) {
         if (match.range.first > cursor) {
@@ -569,6 +675,7 @@ private fun buildInlineAnnotatedString(
     if (cursor < text.length) {
         append(text.substring(cursor))
     }
+}
 }
 
 private val codeHighlightRegex = Regex(

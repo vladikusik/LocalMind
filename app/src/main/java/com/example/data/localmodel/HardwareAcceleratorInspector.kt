@@ -31,7 +31,14 @@ data class HardwareAcceleratorInfo(
 
 object HardwareAcceleratorInspector {
 
+    @Volatile
+    private var cachedInfo: HardwareAcceleratorInfo? = null
+
+    @Volatile
+    private var cachedPerfCores: Int = 0
+
     fun inspect(context: Context): HardwareAcceleratorInfo {
+        cachedInfo?.let { return it }
         // Configure ADSP_LIBRARY_PATH and inspect bundled QNN HTP / LiteRT Dispatch libs immediately
         val qnnStatus = QnnRuntimeConfigurator.configureAndInspect(context)
         val vulkanStatus = VulkanGpuConfigurator.configureAndInspect(context, enableVulkan = true)
@@ -184,7 +191,40 @@ object HardwareAcceleratorInspector {
             totalRamMb = (memInfo.totalMem / (1024L * 1024L)).coerceAtLeast(0L),
             availableRamMb = (memInfo.availMem / (1024L * 1024L)).coerceAtLeast(0L),
             abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
-        )
+        ).also { cachedInfo = it }
+    }
+
+    /**
+     * Detects the number of Prime + Big performance CPU cores on heterogeneous ARM64 big.LITTLE SoCs
+     * by inspecting cpufreq max frequencies. Pinning llama.cpp threads to Prime+Big cores prevents
+     * slow Efficiency-core OpenMP barrier stalls that cut token/sec in half.
+     */
+    fun detectPerformanceCoreCount(): Int {
+        if (cachedPerfCores > 0) return cachedPerfCores
+        val total = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+        val detected = runCatching {
+            val freqs = (0 until total).mapNotNull { cpu ->
+                val f = File("/sys/devices/system/cpu/cpu$cpu/cpufreq/cpuinfo_max_freq")
+                if (f.canRead()) f.readText().trim().toLongOrNull() else null
+            }
+            if (freqs.size >= 4) {
+                val maxFreq = freqs.maxOrNull() ?: 0L
+                val minFreq = freqs.minOrNull() ?: 0L
+                if (maxFreq > 0L && maxFreq > minFreq) {
+                    // Count cores clocked at >= 76% of peak Prime frequency (Prime + Performance clusters)
+                    val bigThreshold = (maxFreq * 76L) / 100L
+                    freqs.count { it >= bigThreshold }.coerceIn(2, 6)
+                } else {
+                    if (total >= 8) 4 else (total - 1).coerceAtLeast(2)
+                }
+            } else {
+                if (total >= 8) 4 else (total - 1).coerceAtLeast(2)
+            }
+        }.getOrElse {
+            if (total >= 8) 4 else (total - 1).coerceAtLeast(2)
+        }
+        cachedPerfCores = detected
+        return detected
     }
 
     private fun existsAny(vararg paths: String): Boolean =

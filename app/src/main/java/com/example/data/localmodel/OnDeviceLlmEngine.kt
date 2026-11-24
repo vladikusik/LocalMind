@@ -3,6 +3,7 @@ package com.example.data.localmodel
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
+import android.os.Process
 import com.example.data.attachments.MessageAttachment
 import com.example.data.local.DownloadedModelEntity
 import com.example.data.mlc.MlcNativeEngineBridge
@@ -21,8 +22,10 @@ import com.llamatik.library.platform.GenStream
 import com.llamatik.library.platform.LlamaBridge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -52,8 +55,12 @@ class OnDeviceLlmEngine(private val context: Context) {
      * and prevents LlamaBridge SIGSEGV race conditions between cancel/re-init/generate.
      */
     private val nativeDispatcher = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "LocalMind-NativeInference").apply {
-            priority = Thread.NORM_PRIORITY + 1
+        Thread({
+            // Hint Android scheduler to keep LLM inference on Prime/Big CPU cores
+            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_MORE_FAVORABLE) }
+            runnable.run()
+        }, "LocalMind-NativeInference").apply {
+            priority = Thread.MAX_PRIORITY - 1
         }
     }.asCoroutineDispatcher()
 
@@ -221,7 +228,7 @@ class OnDeviceLlmEngine(private val context: Context) {
             hardwareBackend = hardwareBackend
         )
 
-        return when (resolvedEngine) {
+        val rawFlow = when (resolvedEngine) {
             LocalInferenceEngine.MLC_LLM -> mlcBridge.streamChatCompletion(
                 modelDir = modelFile,
                 displayName = model.displayName,
@@ -271,6 +278,8 @@ class OnDeviceLlmEngine(private val context: Context) {
                 conversationKey = conversationKey
             )
         }
+        // Decouple C++/JNI token generation from UI collector so native inference never stalls
+        return rawFlow.buffer(Channel.UNLIMITED)
     }
 
     // -------------------------------------------------------------------------
@@ -598,32 +607,44 @@ class OnDeviceLlmEngine(private val context: Context) {
                             }
 
                             tailBuffer.append(text)
-                            val recent = tailBuffer.toString()
-                            val hitStop = stopMarkers.firstOrNull { marker -> recent.contains(marker) }
-                            if (hitStop != null) {
-                                val cleanTail = text.substringBefore(hitStop)
-                                if (cleanTail.isNotEmpty()) {
-                                    chunkCount++
-                                    trySend(
-                                        StreamEvent.Chunk(
-                                            contentDelta = cleanTail,
-                                            modelName = modelLabel
+                            // Fast-path: skip allocating tailBuffer.toString() unless token could close a stop tag
+                            var mayMatchStop = false
+                            for (idx in 0 until text.length) {
+                                when (text[idx]) {
+                                    '>', '|', ']', '/' -> {
+                                        mayMatchStop = true
+                                        break
+                                    }
+                                }
+                            }
+                            if (mayMatchStop) {
+                                val recent = tailBuffer.toString()
+                                val hitStop = stopMarkers.firstOrNull { marker -> recent.contains(marker) }
+                                if (hitStop != null) {
+                                    val cleanTail = text.substringBefore(hitStop)
+                                    if (cleanTail.isNotEmpty()) {
+                                        chunkCount++
+                                        trySend(
+                                            StreamEvent.Chunk(
+                                                contentDelta = cleanTail,
+                                                modelName = modelLabel
+                                            )
                                         )
-                                    )
+                                    }
+                                    if (finished.compareAndSet(false, true)) {
+                                        runCatching { LlamaBridge.nativeCancelGenerate() }
+                                        emitCompletedStats(
+                                            requestStartNs = requestStartNs,
+                                            firstTokenNs = firstTokenNs,
+                                            chunkCount = chunkCount,
+                                            kvReused = false,
+                                            modelLabel = modelLabel
+                                        ) { trySend(it) }
+                                        doneLatch.countDown()
+                                        close()
+                                    }
+                                    return
                                 }
-                                if (finished.compareAndSet(false, true)) {
-                                    runCatching { LlamaBridge.nativeCancelGenerate() }
-                                    emitCompletedStats(
-                                        requestStartNs = requestStartNs,
-                                        firstTokenNs = firstTokenNs,
-                                        chunkCount = chunkCount,
-                                        kvReused = false,
-                                        modelLabel = modelLabel
-                                    ) { trySend(it) }
-                                    doneLatch.countDown()
-                                    close()
-                                }
-                                return
                             }
                             if (tailBuffer.length > 36) {
                                 tailBuffer.delete(0, tailBuffer.length - 36)
@@ -1219,10 +1240,10 @@ class OnDeviceLlmEngine(private val context: Context) {
     }
 
     private fun computeOptimalLlamaThreads(requested: Int): Int {
-        val totalCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
-        // On 8-core big.LITTLE mobile SoCs, pinning to performance cores (4-6 threads) avoids E-core stragglers
-        val perfCap = if (totalCores >= 8) 6 else (totalCores - 1).coerceAtLeast(2)
-        return requested.coerceIn(1, perfCap)
+        // Pin to detected Prime + Big performance cores (typically 4 on 8-core Snapdragon/Dimensity)
+        // so slow E-cores never stall the OpenMP barrier during memory-bound token decode.
+        val perfCores = HardwareAcceleratorInspector.detectPerformanceCoreCount()
+        return requested.coerceIn(1, perfCores)
     }
 
     private enum class GgufTemplateStyle(val stopMarkers: List<String>) {
