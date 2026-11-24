@@ -3,6 +3,12 @@ name: Build LocalMind APK
 on:
   push:
   workflow_dispatch:
+    inputs:
+      include_mlc_runtime:
+        description: "Compile & bundle TVM mlc4j native GPU runtime (libtvm4j_runtime_packed.so)"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -26,6 +32,100 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" "build-tools;36.0.0"
+
+      - name: Cache compiled MLC-LLM TVM Android runtime (mlc4j)
+        id: cache-mlc
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
+            app/libs/tvm4j_core.jar
+            app/libs/mlc4j-ffi.jar
+            app/src/main/assets/mlc-app-config.json
+          key: mlc4j-android-v1-${{ hashFiles('mlc-package-config.json') }}
+
+      - name: Build MLC-LLM TVM native runtime (mlc4j) for arm64-v8a
+        id: build-mlc
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false) && steps.cache-mlc.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "::group::Install NDK, CMake, Rust arm64 target, and mlc-llm-nightly-cpu"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" "cmake;3.22.1"
+          export ANDROID_NDK="$ANDROID_HOME/ndk/27.0.12077973"
+          export TVM_NDK_CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          export PATH="$ANDROID_HOME/cmake/3.22.1/bin:$HOME/.cargo/bin:$PATH"
+
+          rustup target add aarch64-linux-android
+          mkdir -p "$HOME/.cargo"
+          cat <<EOF >> "$HOME/.cargo/config.toml"
+          [target.aarch64-linux-android]
+          linker = "$TVM_NDK_CC"
+          EOF
+
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --pre -U -f https://mlc.ai/wheels mlc-ai-nightly-cpu mlc-llm-nightly-cpu
+          echo "::endgroup::"
+
+          echo "::group::Clone mlc-ai/mlc-llm sources and package Android mlc4j"
+          MLC_WORK="$RUNNER_TEMP/mlc-build"
+          rm -rf "$MLC_WORK"
+          mkdir -p "$MLC_WORK"
+          git clone --depth 1 --recursive --shallow-submodules https://github.com/mlc-ai/mlc-llm.git "$MLC_WORK/mlc-llm"
+          export MLC_LLM_SOURCE_DIR="$MLC_WORK/mlc-llm"
+          export TVM_SOURCE_DIR="$MLC_WORK/mlc-llm/3rdparty/tvm"
+
+          mkdir -p "$MLC_WORK/pkg"
+          cp mlc-package-config.json "$MLC_WORK/pkg/mlc-package-config.json"
+          cd "$MLC_WORK/pkg"
+          mlc_llm package --mlc-llm-source-dir "$MLC_LLM_SOURCE_DIR"
+          echo "::endgroup::"
+
+          echo "::group::Install compiled libtvm4j_runtime_packed.so, jars, and mlc-app-config.json"
+          cd "$GITHUB_WORKSPACE"
+          SO_PATH=$(find "$MLC_WORK/pkg/dist" -name "libtvm4j_runtime_packed.so" | head -n 1 || true)
+          TVM_JAR=$(find "$MLC_WORK/pkg/dist" -name "tvm4j_core.jar" | head -n 1 || true)
+          APP_CFG=$(find "$MLC_WORK/pkg/dist" -name "mlc-app-config.json" | head -n 1 || true)
+
+          if [ -z "$SO_PATH" ] || [ -z "$TVM_JAR" ]; then
+            echo "ERROR: mlc_llm package did not produce libtvm4j_runtime_packed.so or tvm4j_core.jar"
+            exit 1
+          fi
+
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/libs app/src/main/assets
+          cp "$SO_PATH" app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
+          cp "$TVM_JAR" app/libs/tvm4j_core.jar
+          if [ -n "$APP_CFG" ]; then
+            cp "$APP_CFG" app/src/main/assets/mlc-app-config.json
+          fi
+
+          # Compile ai.mlc.mlcllm.JSONFFIEngine.java against tvm4j_core.jar into app/libs/mlc4j-ffi.jar
+          JSON_FFI_JAVA=$(find "$MLC_LLM_SOURCE_DIR/android/mlc4j" -name "JSONFFIEngine.java" | head -n 1 || true)
+          if [ -n "$JSON_FFI_JAVA" ]; then
+            mkdir -p "$MLC_WORK/ffi_classes"
+            javac --release 11 -cp app/libs/tvm4j_core.jar -d "$MLC_WORK/ffi_classes" "$JSON_FFI_JAVA"
+            jar cf app/libs/mlc4j-ffi.jar -C "$MLC_WORK/ffi_classes" .
+          else
+            echo "ERROR: JSONFFIEngine.java not found in $MLC_LLM_SOURCE_DIR/android/mlc4j"
+            exit 1
+          fi
+          ls -lh app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/tvm4j_core.jar app/libs/mlc4j-ffi.jar
+          echo "::endgroup::"
+
+      - name: Verify MLC TVM native bundle status
+        id: mlc-status
+        run: |
+          if [ -f app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so ] && \
+             [ -f app/libs/tvm4j_core.jar ] && \
+             [ -f app/libs/mlc4j-ffi.jar ]; then
+            echo "bundled=true" >> "$GITHUB_OUTPUT"
+            echo "MLC TVM native runtime IS bundled in this APK."
+          else
+            echo "bundled=false" >> "$GITHUB_OUTPUT"
+            rm -f app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/tvm4j_core.jar app/libs/mlc4j-ffi.jar
+            echo "MLC TVM native runtime was NOT bundled; continuing with LiteRT-LM (NPU/GPU), MediaPipe & llama.cpp."
+          fi
 
       - name: Prepare consistent signing keystore
         run: |
@@ -55,6 +155,11 @@ jobs:
           {
             echo "### Що нового у LocalMind v${VERSION_NAME} (build ${VERSION_CODE})"
             echo ""
+            if [ "${{ steps.mlc-status.outputs.bundled }}" = "true" ]; then
+              echo "- Вбудовано нативний **MLC-LLM TVM OpenCL/Vulkan GPU runtime** (\`libtvm4j_runtime_packed.so\` + \`mlc4j\`) для Llama-3.2, Qwen2.5, SmolLM2, Gemma-2, Phi-3.5"
+            else
+              echo "- Нативні рушії у цьому APK: **LiteRT-LM (QNN NPU / OpenCL-Vulkan GPU)**, **MediaPipe GenAI**, **llama.cpp (GGUF)**"
+            fi
             git log -n 6 --pretty=format:"- %s" || true
             echo ""
             echo ""

@@ -19,3 +19,8 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Preserve MLC-LLM (mlc4j) and Apache TVM JNI bindings invoked via reflection
+-keep class ai.mlc.** { *; }
+-keep class org.apache.tvm.** { *; }
+

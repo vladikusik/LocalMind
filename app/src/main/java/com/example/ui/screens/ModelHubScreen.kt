@@ -76,6 +76,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
@@ -452,6 +453,7 @@ fun ModelHubScreen(
                                             model = model,
                                             preferredEngine = localEngine,
                                             hardwareBackend = localBackend,
+                                            mlcNativeReady = hardwareInfo.mlcNativeReady,
                                             isActive = isActive,
                                             onActivate = {
                                                 onActivateDownloaded(model)
@@ -461,6 +463,27 @@ fun ModelHubScreen(
                                         )
                                     }
                                 }
+
+                                val context = LocalContext.current
+                                val totalBytes = remember(downloadedModels) {
+                                    downloadedModels.sumOf { it.sizeBytes }
+                                }
+                                val storagePathDisplay = remember(context) {
+                                    "${context.filesDir.absolutePath}/models"
+                                }
+                                Text(
+                                    text = stringResource(
+                                        R.string.hub_storage_path_label,
+                                        storagePathDisplay,
+                                        if (totalBytes > 0L) formatFileSize(totalBytes) else "0 MB"
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = JetBrainsMonoFontFamily
+                                    ),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
 
                                 Text(
                                     text = stringResource(R.string.hub_runtime_tip),
@@ -542,6 +565,37 @@ fun ModelHubScreen(
                                     )
                                 }
                             }
+
+                            if (hubState.selectedPreset == "mlc" && !hardwareInfo.mlcNativeReady) {
+                                val studioColors = LocalStudioColors.current
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = studioColors.statusWarning.copy(alpha = 0.14f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.hub_mlc_runtime_notice),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        FilledTonalButton(
+                                            onClick = { onSelectPreset("litert") },
+                                            shape = RoundedCornerShape(12.dp),
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                            modifier = Modifier.testTag("hub_switch_litert_button")
+                                        ) {
+                                            Text(
+                                                text = stringResource(R.string.hub_switch_to_litert_action),
+                                                style = MaterialTheme.typography.labelMedium
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -590,6 +644,7 @@ fun ModelHubScreen(
                                 fileError = fileError,
                                 downloadedIds = downloadedModels.map { it.id }.toSet(),
                                 activeDownloads = hubState.activeDownloads,
+                                mlcNativeReady = hardwareInfo.mlcNativeReady,
                                 onToggle = { onToggleRepo(repo.repoId) },
                                 onDownloadFile = onStartDownload,
                                 onCancelDownload = onCancelDownload
@@ -609,15 +664,19 @@ private fun DownloadedModelRow(
     model: DownloadedModelEntity,
     preferredEngine: LocalInferenceEngine,
     hardwareBackend: LocalHardwareBackend,
+    mlcNativeReady: Boolean,
     isActive: Boolean,
     onActivate: () -> Unit,
     onDelete: () -> Unit
 ) {
     val studioColors = LocalStudioColors.current
     val resolvedEngine = LocalInferenceEngine.resolveForFormat(preferredEngine, model.format, hardwareBackend)
+    val isMlcUnavailable = (model.format.equals("mlc", ignoreCase = true) || resolvedEngine == LocalInferenceEngine.MLC_LLM) &&
+        !mlcNativeReady
     val engineBadge = when {
         model.format.lowercase() in setOf("mnn", "dlc", "qnn", "zip") -> stringResource(R.string.hub_badge_local_dream)
         model.format.lowercase() in setOf("safetensors", "ckpt") -> stringResource(R.string.hub_badge_diffusion)
+        isMlcUnavailable -> stringResource(R.string.hub_mlc_apk_required_badge)
         model.format.equals("mlc", ignoreCase = true) || resolvedEngine == LocalInferenceEngine.MLC_LLM ->
             stringResource(R.string.hub_badge_mlc_llm)
         resolvedEngine == LocalInferenceEngine.LLAMA_CPP -> stringResource(R.string.hub_badge_llama_cpp)
@@ -652,14 +711,15 @@ private fun DownloadedModelRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    val badgeTint = if (isMlcUnavailable) studioColors.statusWarning else MaterialTheme.colorScheme.primary
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                        color = badgeTint.copy(alpha = 0.14f)
                     ) {
                         Text(
                             text = engineBadge,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = badgeTint,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
@@ -782,6 +842,7 @@ private fun HfRepositoryCard(
     fileError: String?,
     downloadedIds: Set<String>,
     activeDownloads: Map<String, ActiveDownloadState>,
+    mlcNativeReady: Boolean,
     onToggle: () -> Unit,
     onDownloadFile: (HfModelFile) -> Unit,
     onCancelDownload: (String) -> Unit
@@ -887,13 +948,23 @@ private fun HfRepositoryCard(
                                 val fileKey = "${file.repoId}/${file.path}"
                                 val isDownloaded = downloadedIds.contains(fileKey)
                                 val activeDl = activeDownloads[fileKey]
+                                val isMlcUnavailable = file.format.equals("mlc", ignoreCase = true) && !mlcNativeReady
                                 val badgeLabel = when (file.format.lowercase()) {
                                     "mnn", "dlc", "qnn", "zip" -> stringResource(R.string.hub_badge_local_dream)
                                     "safetensors", "ckpt" -> stringResource(R.string.hub_badge_diffusion)
-                                    "mlc" -> stringResource(R.string.hub_badge_mlc_llm)
+                                    "mlc" -> if (isMlcUnavailable) {
+                                        stringResource(R.string.hub_mlc_apk_required_badge)
+                                    } else {
+                                        stringResource(R.string.hub_badge_mlc_llm)
+                                    }
                                     "gguf" -> stringResource(R.string.hub_badge_llama_cpp)
                                     "litertlm" -> stringResource(R.string.hub_badge_litert_lm)
                                     else -> stringResource(R.string.hub_badge_mediapipe)
+                                }
+                                val badgeColor = if (isMlcUnavailable) {
+                                    studioColors.statusWarning
+                                } else {
+                                    studioColors.statusOnline
                                 }
 
                                 Surface(
@@ -933,12 +1004,12 @@ private fun HfRepositoryCard(
                                                 )
                                                 Surface(
                                                     shape = RoundedCornerShape(6.dp),
-                                                    color = studioColors.statusOnline.copy(alpha = 0.16f)
+                                                    color = badgeColor.copy(alpha = 0.16f)
                                                 ) {
                                                     Text(
                                                         text = badgeLabel,
                                                         style = MaterialTheme.typography.labelSmall,
-                                                        color = studioColors.statusOnline,
+                                                        color = badgeColor,
                                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                                     )
                                                 }

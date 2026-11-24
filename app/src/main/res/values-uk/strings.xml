@@ -365,4 +365,9 @@
     <string name="settings_gpu_perf_diagnostic_cpu_gguf">Порада щодо швидкості: вбудований llama.cpp (llamatik) виконує GGUF лише на CPU ARM64 NEON. Для максимальної швидкості на GPU/NPU вже зараз обирайте LiteRT-LM (.litertlm) або підключайте MLC-LLM Server.</string>
     <string name="settings_mlc_native_status_ready">MLC TVM Native Runtime: Готовий (%1$s)</string>
     <string name="settings_mlc_native_status_server_hint">MLC TVM Native Runtime: не вшитий у APK (зберіть mlc4j або використовуйте провайдер MLC-LLM Server на порту 8000).</string>
+    <string name="mlc_runtime_missing_error">Пакет MLC «%1$s» (%2$s) завантажено та перевірено, але цей APK не містить скомпільованої нативної бібліотеки TVM mlc4j (libtvm4j_runtime_packed.so).\n\nЯк запустити модель на GPU/NPU:\n• Оновіться до нової збірки APK із GitHub Actions (яка автоматично компілює та вшиває mlc4j), або\n• Завантажте модель LiteRT-LM (.litertlm) у Хабі моделей — вона вже працює нативно на OpenCL/Vulkan GPU та QNN NPU, або\n• Підключіть MLC-LLM Server у Налаштуваннях.</string>
+    <string name="hub_storage_path_label">Папка моделей: %1$s (%2$s)</string>
+    <string name="hub_mlc_apk_required_badge">Потрібен MLC APK</string>
+    <string name="hub_mlc_runtime_notice">У цій збірці APK ще немає скомпільованого рушія TVM mlc4j. Щоб запускати локальні моделі на GPU/NPU прямо зараз, перейдіть до LiteRT-LM (.litertlm) або оновіть APK через GitHub Actions.</string>
+    <string name="hub_switch_to_litert_action">Перейти до LiteRT-LM (GPU/NPU)</string>
 </resources>

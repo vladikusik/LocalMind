@@ -1,6 +1,7 @@
 package com.example.data.mlc
 
 import android.content.Context
+import com.example.R
 import com.example.data.network.ChatMessageDto
 import com.example.data.network.StreamEvent
 import kotlinx.coroutines.channels.awaitClose
@@ -15,12 +16,19 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
+data class MlcAppModelEntry(
+    val modelId: String,
+    val modelLib: String,
+    val modelUrl: String
+)
+
 data class MlcRuntimeStatus(
     val isTvmRuntimeBundled: Boolean,
     val isMlc4jClassesAvailable: Boolean,
     val activeGpuBackend: String,
     val hasOpenCl: Boolean,
-    val hasVulkan: Boolean
+    val hasVulkan: Boolean,
+    val bundledModelLibs: List<MlcAppModelEntry> = emptyList()
 ) {
     val isNativeMlcReady: Boolean
         get() = isTvmRuntimeBundled && isMlc4jClassesAvailable
@@ -34,6 +42,8 @@ data class MlcRuntimeStatus(
  *   with PagedKVCache & chunked prefill.
  * - Stream-Back Thread (`runBackgroundStreamBackLoop`) delivers OpenAI JSON-FFI token chunks
  *   and `usage.extra` prefill/decode metrics without stalling GPU decode.
+ * - Resolves compiled `model_lib` symbols from APK-bundled `assets/mlc-app-config.json`
+ *   (produced by `mlc_llm package` during CI build).
  *
  * Google Play Policy Compliant: strictly loads only APK-bundled native libraries from
  * `nativeLibraryDir` (never downloads `.so`/`.jar`/`.dex` at runtime).
@@ -48,6 +58,8 @@ class MlcNativeEngineBridge(private val context: Context) {
     private var loadedModelLib: String? = null
     @Volatile
     private var loopsStarted = false
+    @Volatile
+    private var cachedAppModels: List<MlcAppModelEntry>? = null
 
     private val bgExecutor = Executors.newFixedThreadPool(2) { runnable ->
         Thread(runnable, "LocalMind-MLC-TVM").apply {
@@ -98,7 +110,8 @@ class MlcNativeEngineBridge(private val context: Context) {
             isMlc4jClassesAvailable = hasMlc4jClass,
             activeGpuBackend = gpuBackend,
             hasOpenCl = hasOpenCl,
-            hasVulkan = hasVulkan
+            hasVulkan = hasVulkan,
+            bundledModelLibs = loadBundledAppConfig()
         )
     }
 
@@ -116,17 +129,14 @@ class MlcNativeEngineBridge(private val context: Context) {
             val quant = config?.quantization ?: "q4f16_1"
             close(
                 IOException(
-                    "MLC bundle '$displayName' ($quant) is downloaded and verified, but this APK does not bundle " +
-                        "the compiled TVM `mlc4j` native runtime (`libtvm4j_runtime_packed.so`). " +
-                        "Build with the MLC TVM job in GitHub Actions, or use LiteRT-LM (.litertlm) for native " +
-                        "OpenCL/Vulkan GPU & QNN NPU acceleration today, or connect to `MLC-LLM Server` in Settings."
+                    context.getString(R.string.mlc_runtime_missing_error, displayName, quant)
                 )
             )
             return@callbackFlow
         }
 
         val engine = try {
-            ensureReloaded(modelDir, config)
+            ensureReloaded(modelDir, config, status.bundledModelLibs)
         } catch (t: Throwable) {
             close(IOException("MLC TVM engine reload failed: ${t.localizedMessage}", t))
             return@callbackFlow
@@ -222,8 +232,14 @@ class MlcNativeEngineBridge(private val context: Context) {
         }
     }
 
-    private fun ensureReloaded(modelDir: File, config: MlcChatConfig?): Any {
+    private fun ensureReloaded(
+        modelDir: File,
+        config: MlcChatConfig?,
+        bundledModels: List<MlcAppModelEntry>
+    ): Any {
         synchronized(lock) {
+            runCatching { System.loadLibrary("tvm4j_runtime_packed") }
+
             val engineClass = Class.forName("ai.mlc.mlcllm.JSONFFIEngine")
             var engine = jsonFfiEngine
             if (engine == null) {
@@ -254,19 +270,99 @@ class MlcNativeEngineBridge(private val context: Context) {
                 jsonFfiEngine = engine
             }
 
-            val modelLib = config?.modelLib?.ifBlank { "system" } ?: "system"
+            val modelLib = resolveCompiledModelLib(modelDir, config, bundledModels)
             if (loadedModelDir != modelDir.absolutePath || loadedModelLib != modelLib) {
-                val reloadPayload = JSONObject().apply {
-                    put("model", modelDir.absolutePath)
-                    put("model_lib", "system://$modelLib")
-                    put("mode", "interactive")
-                }.toString()
-                engineClass.getMethod("reload", String::class.java).invoke(engine, reloadPayload)
+                val systemLibUri = if (modelLib.startsWith("system://")) modelLib else "system://$modelLib"
+                val reloadSingleArg = runCatching {
+                    engineClass.getMethod("reload", String::class.java)
+                }.getOrNull()
+
+                if (reloadSingleArg != null) {
+                    val reloadPayload = JSONObject().apply {
+                        put("model", modelDir.absolutePath)
+                        put("model_lib", systemLibUri)
+                        put("mode", "interactive")
+                    }.toString()
+                    reloadSingleArg.invoke(engine, reloadPayload)
+                } else {
+                    engineClass.getMethod("reload", String::class.java, String::class.java)
+                        .invoke(engine, modelDir.absolutePath, modelLib)
+                }
                 loadedModelDir = modelDir.absolutePath
                 loadedModelLib = modelLib
             }
             return engine
         }
+    }
+
+    /**
+     * Resolves the exact TVM `model_lib` symbol compiled into `libtvm4j_runtime_packed.so`.
+     * Hugging Face `mlc-chat-config.json` typically omits `model_lib`, so we match against
+     * APK-bundled `assets/mlc-app-config.json` (generated by `mlc_llm package`) by model_id,
+     * repo URL, or architecture + quantization prefix.
+     */
+    private fun resolveCompiledModelLib(
+        modelDir: File,
+        config: MlcChatConfig?,
+        bundledModels: List<MlcAppModelEntry>
+    ): String {
+        val explicit = config?.modelLib?.trim().orEmpty()
+        if (explicit.isNotBlank()) return explicit
+
+        val dirNameLower = modelDir.name.lowercase()
+        // 1. Exact match by model_id or repo URL segment in bundled mlc-app-config.json
+        bundledModels.firstOrNull { entry ->
+            val idLower = entry.modelId.lowercase()
+            val urlSlug = entry.modelUrl.trimEnd('/').substringAfterLast('/').lowercase()
+            (idLower.isNotBlank() && dirNameLower.contains(idLower)) ||
+                (urlSlug.isNotBlank() && dirNameLower.contains(urlSlug))
+        }?.let { return it.modelLib }
+
+        // 2. Architecture + quantization prefix match (e.g. llama_q4f16_1_...)
+        val modelType = config?.modelType?.lowercase()?.replace("-", "").orEmpty()
+        val quant = config?.quantization?.lowercase().orEmpty()
+        if (modelType.isNotBlank() && quant.isNotBlank()) {
+            val prefix = "${modelType}_${quant}"
+            bundledModels.firstOrNull { entry ->
+                entry.modelLib.lowercase().startsWith(prefix)
+            }?.let { return it.modelLib }
+        }
+
+        if (bundledModels.isNotEmpty()) {
+            val supported = bundledModels.joinToString(", ") { it.modelId.ifBlank { it.modelLib } }
+            throw IOException(
+                "No compiled TVM model_lib found in this APK for '${modelDir.name}'. " +
+                    "Bundled MLC kernels: $supported."
+            )
+        }
+
+        return "${modelType.ifBlank { "llama" }}_${quant.ifBlank { "q4f16_1" }}"
+    }
+
+    private fun loadBundledAppConfig(): List<MlcAppModelEntry> {
+        cachedAppModels?.let { return it }
+        val parsed = runCatching {
+            val jsonText = context.assets.open("mlc-app-config.json").bufferedReader().use { it.readText() }
+            val root = JSONObject(jsonText)
+            val arr = root.optJSONArray("model_list") ?: JSONArray()
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val lib = item.optString("model_lib").trim()
+                    if (lib.isNotBlank()) {
+                        add(
+                            MlcAppModelEntry(
+                                modelId = item.optString("model_id").trim(),
+                                modelLib = lib,
+                                modelUrl = item.optString("model_url").trim()
+                            )
+                        )
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
+        cachedAppModels = parsed
+        return parsed
     }
 
     private fun dispatchStreamResponses(responsesJson: String) {

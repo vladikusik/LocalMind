@@ -365,4 +365,9 @@
     <string name="settings_gpu_perf_diagnostic_cpu_gguf">Performance note: Bundled llama.cpp (llamatik) runs GGUF on ARM64 NEON CPU only. For maximum hardware GPU/NPU speed right now, use LiteRT-LM (.litertlm) models or connect MLC-LLM Server.</string>
     <string name="settings_mlc_native_status_ready">MLC TVM Native Runtime: Ready (%1$s)</string>
     <string name="settings_mlc_native_status_server_hint">MLC TVM Native Runtime: Not bundled in APK (compile mlc4j or use MLC-LLM Server provider on port 8000).</string>
+    <string name="mlc_runtime_missing_error">MLC bundle \'%1$s\' (%2$s) is downloaded, but this APK does not include the compiled TVM mlc4j native GPU library (libtvm4j_runtime_packed.so).\n\nHow to run models on GPU/NPU:\n• Update to the latest GitHub Actions APK (which compiles and bundles mlc4j automatically), or\n• Download a LiteRT-LM (.litertlm) model in Model Hub for native OpenCL/Vulkan GPU &amp; QNN NPU speed right now, or\n• Connect to MLC-LLM Server in Settings.</string>
+    <string name="hub_storage_path_label">Storage: %1$s (%2$s)</string>
+    <string name="hub_mlc_apk_required_badge">Needs MLC APK</string>
+    <string name="hub_mlc_runtime_notice">This APK build does not bundle the compiled TVM mlc4j native library yet. To run on-device GPU/NPU models immediately without waiting for a new GitHub Actions build, use LiteRT-LM (.litertlm).</string>
+    <string name="hub_switch_to_litert_action">Switch to LiteRT-LM (GPU/NPU)</string>
 </resources>

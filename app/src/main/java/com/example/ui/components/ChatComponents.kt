@@ -407,7 +407,11 @@ private fun AssistantMessageBlock(
                             markdown = message.content,
                             textColor = MaterialTheme.colorScheme.onErrorContainer
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        @OptIn(ExperimentalLayoutApi::class)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             FilledTonalButton(
                                 onClick = onRetryError,
                                 modifier = Modifier.testTag("retry_error_button")
@@ -418,7 +422,11 @@ private fun AssistantMessageBlock(
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(Modifier.width(6.dp))
-                                Text(stringResource(R.string.action_retry))
+                                Text(
+                                    text = stringResource(R.string.action_retry),
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
                             OutlinedButton(
                                 onClick = onOpenSettings,
@@ -430,7 +438,11 @@ private fun AssistantMessageBlock(
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(Modifier.width(6.dp))
-                                Text(stringResource(R.string.welcome_configure_server))
+                                Text(
+                                    text = stringResource(R.string.welcome_configure_server),
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
                         }
                     }

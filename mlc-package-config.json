@@ -1,0 +1,47 @@
+{
+  "device": "android",
+  "model_list": [
+    {
+      "model": "HF://mlc-ai/Llama-3.2-1B-Instruct-q4f16_1-MLC",
+      "model_id": "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+      "estimated_vram_bytes": 1129000000,
+      "bundle_weight": false
+    },
+    {
+      "model": "HF://mlc-ai/Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+      "model_id": "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+      "estimated_vram_bytes": 1500000000,
+      "bundle_weight": false
+    },
+    {
+      "model": "HF://mlc-ai/Llama-3.2-3B-Instruct-q4f16_1-MLC",
+      "model_id": "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+      "estimated_vram_bytes": 2600000000,
+      "bundle_weight": false
+    },
+    {
+      "model": "HF://mlc-ai/Qwen2.5-3B-Instruct-q4f16_1-MLC",
+      "model_id": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
+      "estimated_vram_bytes": 2500000000,
+      "bundle_weight": false
+    },
+    {
+      "model": "HF://mlc-ai/SmolLM2-1.7B-Instruct-q4f16_1-MLC",
+      "model_id": "SmolLM2-1.7B-Instruct-q4f16_1-MLC",
+      "estimated_vram_bytes": 1500000000,
+      "bundle_weight": false
+    },
+    {
+      "model": "HF://mlc-ai/gemma-2-2b-it-q4f16_1-MLC",
+      "model_id": "gemma-2-2b-it-q4f16_1-MLC",
+      "estimated_vram_bytes": 2100000000,
+      "bundle_weight": false
+    },
+    {
+      "model": "HF://mlc-ai/Phi-3.5-mini-instruct-q4f16_1-MLC",
+      "model_id": "Phi-3.5-mini-instruct-q4f16_1-MLC",
+      "estimated_vram_bytes": 2900000000,
+      "bundle_weight": false
+    }
+  ]
+}
