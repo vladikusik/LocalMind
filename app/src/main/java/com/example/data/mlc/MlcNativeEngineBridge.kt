@@ -159,13 +159,22 @@ class MlcNativeEngineBridge(private val context: Context) {
                             val choices = resp.optJSONArray("choices")
                             if (choices != null && choices.length() > 0) {
                                 val choice = choices.optJSONObject(0)
-                                val delta = choice?.optJSONObject("delta")?.optString("content").orEmpty()
+                                val deltaObj = choice?.optJSONObject("delta")
+                                val delta = if (deltaObj != null && !deltaObj.isNull("content")) {
+                                    deltaObj.optString("content", "")
+                                } else {
+                                    ""
+                                }
                                 if (delta.isNotEmpty()) {
                                     if (firstTokenNs == 0L) firstTokenNs = System.nanoTime()
                                     decodeChunks++
                                     trySend(StreamEvent.Chunk(contentDelta = delta, modelName = modelLabel))
                                 }
-                                val finishReason = choice?.optString("finish_reason").orEmpty()
+                                val finishReason = if (choice != null && !choice.isNull("finish_reason")) {
+                                    choice.optString("finish_reason", "")
+                                } else {
+                                    ""
+                                }
                                 if (finishReason.isNotBlank() && finishReason != "null") {
                                     val usage = resp.optJSONObject("usage")
                                     val extra = usage?.optJSONObject("extra")
@@ -272,7 +281,8 @@ class MlcNativeEngineBridge(private val context: Context) {
 
             val modelLib = resolveCompiledModelLib(modelDir, config, bundledModels)
             if (loadedModelDir != modelDir.absolutePath || loadedModelLib != modelLib) {
-                val systemLibUri = if (modelLib.startsWith("system://")) modelLib else "system://$modelLib"
+                val cleanLib = modelLib.removePrefix("system://")
+                val systemLibUri = "system://$cleanLib"
                 val reloadSingleArg = runCatching {
                     engineClass.getMethod("reload", String::class.java)
                 }.getOrNull()
@@ -286,13 +296,32 @@ class MlcNativeEngineBridge(private val context: Context) {
                     reloadSingleArg.invoke(engine, reloadPayload)
                 } else {
                     engineClass.getMethod("reload", String::class.java, String::class.java)
-                        .invoke(engine, modelDir.absolutePath, modelLib)
+                        .invoke(engine, modelDir.absolutePath, cleanLib)
                 }
                 loadedModelDir = modelDir.absolutePath
                 loadedModelLib = modelLib
             }
             return engine
         }
+    }
+
+    fun getBundledRepoIds(): List<String> {
+        return loadBundledAppConfig().mapNotNull { entry ->
+            val url = entry.modelUrl.trim().trimEnd('/')
+            when {
+                url.contains("huggingface.co/") -> {
+                    val tail = url.substringAfter("huggingface.co/").removeSuffix("/resolve/main")
+                    val parts = tail.split('/').filter { it.isNotBlank() }
+                    if (parts.size >= 2) "${parts[0]}/${parts[1]}" else null
+                }
+                url.startsWith("HF://", ignoreCase = true) -> {
+                    val tail = url.substring(5).trim('/')
+                    if (tail.contains('/')) tail else null
+                }
+                entry.modelId.isNotBlank() -> "mlc-ai/${entry.modelId}"
+                else -> null
+            }
+        }.distinct()
     }
 
     /**

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       include_mlc_runtime:
-        description: "Compile & bundle TVM mlc4j native GPU runtime (libtvm4j_runtime_packed.so)"
+        description: "Bundle official prebuilt TVM mlc4j native GPU runtime (libtvm4j_runtime_packed.so)"
         required: false
         default: true
         type: boolean
@@ -28,142 +28,118 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Set up Python 3.11 for MLC-LLM
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Accept Android SDK licenses & install Android 36.1
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" "build-tools;36.0.0"
 
-      - name: Cache compiled MLC-LLM TVM Android runtime (mlc4j)
+      - name: Cache official prebuilt MLC-LLM TVM Android runtime (mlc4j)
         id: cache-mlc
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false }}
         uses: actions/cache@v4
         with:
           path: |
             app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
-            app/libs/tvm4j_core.jar
-            app/libs/mlc4j-ffi.jar
+            app/libs/mlc4j-runtime.jar
             app/src/main/assets/mlc-app-config.json
-          key: mlc4j-android-v2-${{ hashFiles('mlc-package-config.json') }}
+          key: mlc4j-prebuilt-apk-v3
 
-      - name: Build MLC-LLM TVM native runtime (mlc4j) for arm64-v8a
+      - name: Extract official prebuilt MLC-LLM TVM native runtime (mlc4j)
         id: build-mlc
         if: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false) && steps.cache-mlc.outputs.cache-hit != 'true' }}
-        continue-on-error: true
         run: |
           set -euo pipefail
-          LOG_FILE="$RUNNER_TEMP/mlc-build.log"
-          : > "$LOG_FILE"
-          exec > >(tee -a "$LOG_FILE") 2>&1
-
-          echo "::group::Install ninja-build, git-lfs, NDK, CMake, Rust arm64 target, and mlc-llm-nightly-cpu"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build git-lfs
-
-          if [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "$ANDROID_NDK_LATEST_HOME" ]; then
-            export ANDROID_NDK="$ANDROID_NDK_LATEST_HOME"
-          else
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973"
-            export ANDROID_NDK="$ANDROID_HOME/ndk/27.0.12077973"
-          fi
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "cmake;3.22.1"
-
-          export TVM_NDK_CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
-          if [ ! -x "$TVM_NDK_CC" ]; then
-            export TVM_NDK_CC=$(find "$ANDROID_NDK/toolchains/llvm/prebuilt" -name "aarch64-linux-android*-clang" | sort | head -n 1)
-          fi
-          echo "Using ANDROID_NDK=$ANDROID_NDK"
-          echo "Using TVM_NDK_CC=$TVM_NDK_CC"
-
-          export PATH="$ANDROID_HOME/cmake/3.22.1/bin:$HOME/.cargo/bin:$PATH"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TVM_NDK_CC"
-          export GIT_LFS_SKIP_SMUDGE=1
-
-          rustup target add aarch64-linux-android
-          mkdir -p "$HOME/.cargo"
-          cat <<EOF > "$HOME/.cargo/config.toml"
-          [target.aarch64-linux-android]
-          linker = "$TVM_NDK_CC"
-          EOF
-
-          python -m venv "$RUNNER_TEMP/mlc-venv"
-          source "$RUNNER_TEMP/mlc-venv/bin/activate"
-          pip install --upgrade pip
-          pip install --pre -U -f https://mlc.ai/wheels mlc-ai-nightly-cpu mlc-llm-nightly-cpu
-          which mlc_llm
-          echo "::endgroup::"
-
-          echo "::group::Clone mlc-ai/mlc-llm sources and run mlc_llm package"
-          MLC_WORK="$RUNNER_TEMP/mlc-build"
+          MLC_WORK="$RUNNER_TEMP/mlc-prebuilt"
           rm -rf "$MLC_WORK"
-          mkdir -p "$MLC_WORK"
-          git clone --depth 1 --recursive --shallow-submodules https://github.com/mlc-ai/mlc-llm.git "$MLC_WORK/mlc-llm"
-          export MLC_LLM_SOURCE_DIR="$MLC_WORK/mlc-llm"
-          export TVM_SOURCE_DIR="$MLC_WORK/mlc-llm/3rdparty/tvm"
-          export TVM_HOME="$TVM_SOURCE_DIR"
+          mkdir -p "$MLC_WORK/apk" "$MLC_WORK/filtered" "$MLC_WORK/dex2jar"
 
-          mkdir -p "$MLC_WORK/pkg"
-          cp mlc-package-config.json "$MLC_WORK/pkg/mlc-package-config.json"
-          cd "$MLC_WORK/pkg"
-          mlc_llm package
+          echo "::group::Download official prebuilt mlc-chat.apk from mlc-ai/binary-mlc-llm-libs"
+          APK_URL="https://github.com/mlc-ai/binary-mlc-llm-libs/releases/download/Android/mlc-chat.apk"
+          if ! curl -fsSLI "$APK_URL" >/dev/null 2>&1; then
+            APK_URL=$(curl -fsSL "https://api.github.com/repos/mlc-ai/binary-mlc-llm-libs/releases" \
+              | python3 -c "import sys, json; rels=json.load(sys.stdin); urls=[a['browser_download_url'] for r in rels for a in r.get('assets',[]) if a['name'].lower().endswith('.apk') and 'mlc' in a['name'].lower()]; print(urls[0] if urls else '')")
+          fi
+          if [ -z "$APK_URL" ]; then
+            echo "ERROR: Could not locate mlc-chat.apk in mlc-ai/binary-mlc-llm-libs releases."
+            exit 1
+          fi
+          echo "Downloading: $APK_URL"
+          curl -fSL --retry 3 -o "$MLC_WORK/mlc-chat.apk" "$APK_URL"
           echo "::endgroup::"
 
-          echo "::group::Install compiled libtvm4j_runtime_packed.so, jars, and mlc-app-config.json"
-          cd "$GITHUB_WORKSPACE"
-          SO_PATH=$(find "$MLC_WORK/pkg/dist" -name "libtvm4j_runtime_packed.so" | head -n 1 || true)
-          TVM_JAR=$(find "$MLC_WORK/pkg/dist" -name "tvm4j_core.jar" | head -n 1 || true)
-          APP_CFG=$(find "$MLC_WORK/pkg/dist" -name "mlc-app-config.json" | head -n 1 || true)
-
-          if [ -z "$SO_PATH" ] || [ -z "$TVM_JAR" ]; then
-            echo "ERROR: mlc_llm package did not produce libtvm4j_runtime_packed.so or tvm4j_core.jar"
-            find "$MLC_WORK/pkg/dist" -maxdepth 4 || true
+          echo "::group::Extract libtvm4j_runtime_packed.so and mlc-app-config.json"
+          unzip -q "$MLC_WORK/mlc-chat.apk" -d "$MLC_WORK/apk"
+          SO_PATH=$(find "$MLC_WORK/apk/lib/arm64-v8a" -name "libtvm4j_runtime_packed.so" | head -n 1 || true)
+          if [ -z "$SO_PATH" ] || [ ! -s "$SO_PATH" ]; then
+            echo "ERROR: libtvm4j_runtime_packed.so not found inside mlc-chat.apk!"
+            find "$MLC_WORK/apk/lib" -maxdepth 3 || true
             exit 1
           fi
 
           mkdir -p app/src/main/jniLibs/arm64-v8a app/libs app/src/main/assets
           cp "$SO_PATH" app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
-          cp "$TVM_JAR" app/libs/tvm4j_core.jar
-          if [ -n "$APP_CFG" ]; then
-            cp "$APP_CFG" app/src/main/assets/mlc-app-config.json
-          fi
 
-          JSON_FFI_JAVA=$(find "$MLC_LLM_SOURCE_DIR/android/mlc4j" -name "JSONFFIEngine.java" | head -n 1 || true)
-          if [ -n "$JSON_FFI_JAVA" ]; then
-            mkdir -p "$MLC_WORK/ffi_classes"
-            javac --release 11 -cp app/libs/tvm4j_core.jar -d "$MLC_WORK/ffi_classes" "$JSON_FFI_JAVA"
-            jar cf app/libs/mlc4j-ffi.jar -C "$MLC_WORK/ffi_classes" .
-          else
-            echo "ERROR: JSONFFIEngine.java not found in $MLC_LLM_SOURCE_DIR/android/mlc4j"
+          APP_CFG=$(find "$MLC_WORK/apk/assets" -name "mlc-app-config.json" | head -n 1 || true)
+          if [ -n "$APP_CFG" ] && [ -s "$APP_CFG" ]; then
+            cp "$APP_CFG" app/src/main/assets/mlc-app-config.json
+            echo "Bundled mlc-app-config.json:"
+            cat app/src/main/assets/mlc-app-config.json
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Extract ABI-matched org.apache.tvm & ai.mlc.mlcllm.JSONFFIEngine classes via dex2jar"
+          D2J_URL="https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip"
+          curl -fSL --retry 3 -o "$MLC_WORK/dex2jar.zip" "$D2J_URL"
+          unzip -q "$MLC_WORK/dex2jar.zip" -d "$MLC_WORK/dex2jar"
+          D2J_BIN=$(find "$MLC_WORK/dex2jar" -name "d2j-dex2jar.sh" | head -n 1)
+          chmod +x "$D2J_BIN" "$(dirname "$D2J_BIN")"/*.sh
+
+          for dex in "$MLC_WORK/apk"/classes*.dex; do
+            [ -f "$dex" ] || continue
+            base=$(basename "$dex" .dex)
+            "$D2J_BIN" -f -o "$MLC_WORK/${base}.jar" "$dex"
+            unzip -qo "$MLC_WORK/${base}.jar" "org/apache/tvm/*" "ai/mlc/mlcllm/JSONFFIEngine*" -d "$MLC_WORK/filtered" 2>/dev/null || true
+          done
+
+          if [ ! -f "$MLC_WORK/filtered/ai/mlc/mlcllm/JSONFFIEngine.class" ] || [ ! -f "$MLC_WORK/filtered/org/apache/tvm/LibInfo.class" ]; then
+            echo "ERROR: JSONFFIEngine.class or org.apache.tvm.LibInfo.class not found in mlc-chat.apk dex!"
+            find "$MLC_WORK/filtered" -maxdepth 4 || true
             exit 1
           fi
-          ls -lh app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/tvm4j_core.jar app/libs/mlc4j-ffi.jar
+
+          # Include org.slf4j only if org.apache.tvm.Base references it
+          if [ -f "$MLC_WORK/filtered/org/apache/tvm/Base.class" ] && javap -v "$MLC_WORK/filtered/org/apache/tvm/Base.class" | grep -q "org/slf4j/"; then
+            echo "org.apache.tvm.Base references org.slf4j — extracting org/slf4j classes..."
+            for jar_file in "$MLC_WORK"/classes*.jar; do
+              [ -f "$jar_file" ] || continue
+              unzip -qo "$jar_file" "org/slf4j/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
+            done
+          fi
+
+          jar cf app/libs/mlc4j-runtime.jar -C "$MLC_WORK/filtered" .
+          javap -cp app/libs/mlc4j-runtime.jar ai.mlc.mlcllm.JSONFFIEngine
+          ls -lh app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/mlc4j-runtime.jar
           echo "::endgroup::"
 
       - name: Verify MLC TVM native bundle status
         id: mlc-status
         run: |
           if [ -f app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so ] && \
-             [ -f app/libs/tvm4j_core.jar ] && \
-             [ -f app/libs/mlc4j-ffi.jar ]; then
+             [ -f app/libs/mlc4j-runtime.jar ]; then
             echo "bundled=true" >> "$GITHUB_OUTPUT"
-            echo "MLC TVM native runtime IS bundled in this APK."
-          else
-            echo "bundled=false" >> "$GITHUB_OUTPUT"
-            rm -f app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/tvm4j_core.jar app/libs/mlc4j-ffi.jar app/src/main/assets/mlc-app-config.json
-            echo "MLC TVM native runtime was NOT bundled; continuing with LiteRT-LM (NPU/GPU), MediaPipe & llama.cpp."
-            if [ -f "$RUNNER_TEMP/mlc-build.log" ]; then
-              {
-                echo "### MLC-LLM Build Warning"
-                echo "MLC TVM native runtime was skipped due to a build error (last 30 lines):"
-                echo '```'
-                tail -n 30 "$RUNNER_TEMP/mlc-build.log"
-                echo '```'
-              } >> "$GITHUB_STEP_SUMMARY"
+            MODELS=""
+            if [ -f app/src/main/assets/mlc-app-config.json ]; then
+              MODELS=$(python3 -c "import json; d=json.load(open('app/src/main/assets/mlc-app-config.json')); print(', '.join(m.get('model_id','') for m in d.get('model_list',[]) if m.get('model_id')))" || true)
             fi
+            echo "models=$MODELS" >> "$GITHUB_OUTPUT"
+            echo "MLC TVM native runtime IS bundled in this APK. Models: $MODELS"
+          else
+            if [ "${{ github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false }}" = "true" ]; then
+              echo "ERROR: MLC runtime was requested but artifacts are missing!"
+              exit 1
+            fi
+            echo "bundled=false" >> "$GITHUB_OUTPUT"
+            echo "models=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Restore cached fallback signing keystore (if repo has no keystore file or secret)
@@ -220,7 +196,10 @@ jobs:
             echo "### Що нового у LocalMind v${VERSION_NAME} (build ${VERSION_CODE})"
             echo ""
             if [ "${{ steps.mlc-status.outputs.bundled }}" = "true" ]; then
-              echo "- Вбудовано нативний **MLC-LLM TVM OpenCL/Vulkan GPU runtime** (\`libtvm4j_runtime_packed.so\` + \`mlc4j\`) для Llama-3.2, Qwen2.5, Gemma-2"
+              echo "- Вбудовано нативний **MLC-LLM TVM OpenCL/Vulkan GPU runtime** (\`libtvm4j_runtime_packed.so\` + \`mlc4j\`)"
+              if [ -n "${{ steps.mlc-status.outputs.models }}" ]; then
+                echo "- Скомпільовані MLC GPU ядра в цьому APK: ${{ steps.mlc-status.outputs.models }}"
+              fi
             else
               echo "- Нативні рушії у цьому APK: **LiteRT-LM (QNN NPU / OpenCL-Vulkan GPU)**, **MediaPipe GenAI**, **llama.cpp (GGUF)**"
             fi
@@ -243,7 +222,7 @@ jobs:
           APP_VERSION_NAME: ${{ steps.version.outputs.name }}
         run: gradle :app:assembleDebug --no-daemon --no-configuration-cache
 
-      - name: Verify APK versionCode & signing certificate
+      - name: Verify APK versionCode, signing certificate & bundled MLC native library
         run: |
           set -euo pipefail
           APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
@@ -255,6 +234,14 @@ jobs:
           if [[ "$BADGING" != *"$EXPECTED_CODE"* ]]; then
             echo "ERROR: APK does not contain expected $EXPECTED_CODE!"
             exit 1
+          fi
+
+          if [ "${{ steps.mlc-status.outputs.bundled }}" = "true" ]; then
+            if ! unzip -l "$APK_PATH" | grep -q "lib/arm64-v8a/libtvm4j_runtime_packed.so"; then
+              echo "ERROR: libtvm4j_runtime_packed.so is missing from the final APK!"
+              exit 1
+            fi
+            echo "Verified: lib/arm64-v8a/libtvm4j_runtime_packed.so is packaged inside $APK_PATH"
           fi
 
           "$BUILD_TOOLS/apksigner" verify --print-certs "$APK_PATH"

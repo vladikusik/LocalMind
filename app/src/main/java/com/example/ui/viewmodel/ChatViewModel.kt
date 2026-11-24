@@ -738,8 +738,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             result.fold(
                 onSuccess = { repos ->
+                    val mergedRepos = if (_modelHubState.value.selectedPreset == "mlc") {
+                        val bundledIds = com.example.data.mlc.MlcNativeEngineBridge(getApplication())
+                            .getBundledRepoIds()
+                        if (bundledIds.isNotEmpty()) {
+                            val byId = repos.associateBy { it.repoId.lowercase() }
+                            val prioritized = bundledIds.map { repoId ->
+                                byId[repoId.lowercase()] ?: HfRepoSummary(
+                                    repoId = repoId,
+                                    author = repoId.substringBefore('/', "mlc-ai"),
+                                    downloads = 50_000L,
+                                    likes = 100,
+                                    isGated = false,
+                                    tags = listOf("mlc", "prebuilt-gpu")
+                                )
+                            }
+                            val bundledSet = bundledIds.map { it.lowercase() }.toSet()
+                            prioritized + repos.filterNot { it.repoId.lowercase() in bundledSet }
+                        } else {
+                            repos
+                        }
+                    } else {
+                        repos
+                    }
                     _modelHubState.update {
-                        it.copy(isSearching = false, repositories = repos, searchError = null)
+                        it.copy(isSearching = false, repositories = mergedRepos, searchError = null)
                     }
                 },
                 onFailure = { err ->
