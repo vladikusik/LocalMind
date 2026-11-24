@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.localmind.qxvrtk"
     minSdk = 24
     targetSdk = 36
-    versionCode = System.getenv("APP_VERSION_CODE")?.toIntOrNull() ?: 100
-    versionName = System.getenv("APP_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.1.0"
+    versionCode = providers.environmentVariable("APP_VERSION_CODE").orNull?.toIntOrNull() ?: 100
+    versionName = providers.environmentVariable("APP_VERSION_NAME").orNull?.takeIf { it.isNotBlank() } ?: "1.1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

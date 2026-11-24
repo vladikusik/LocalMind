@@ -28,6 +28,11 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - name: Set up Python 3.11 for MLC-LLM
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Accept Android SDK licenses & install Android 36.1
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
@@ -43,7 +48,7 @@ jobs:
             app/libs/tvm4j_core.jar
             app/libs/mlc4j-ffi.jar
             app/src/main/assets/mlc-app-config.json
-          key: mlc4j-android-v1-${{ hashFiles('mlc-package-config.json') }}
+          key: mlc4j-android-v2-${{ hashFiles('mlc-package-config.json') }}
 
       - name: Build MLC-LLM TVM native runtime (mlc4j) for arm64-v8a
         id: build-mlc
@@ -51,35 +56,60 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          echo "::group::Install NDK, CMake, Rust arm64 target, and mlc-llm-nightly-cpu"
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" "cmake;3.22.1"
-          export ANDROID_NDK="$ANDROID_HOME/ndk/27.0.12077973"
+          LOG_FILE="$RUNNER_TEMP/mlc-build.log"
+          : > "$LOG_FILE"
+          exec > >(tee -a "$LOG_FILE") 2>&1
+
+          echo "::group::Install ninja-build, git-lfs, NDK, CMake, Rust arm64 target, and mlc-llm-nightly-cpu"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build git-lfs
+
+          if [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "$ANDROID_NDK_LATEST_HOME" ]; then
+            export ANDROID_NDK="$ANDROID_NDK_LATEST_HOME"
+          else
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973"
+            export ANDROID_NDK="$ANDROID_HOME/ndk/27.0.12077973"
+          fi
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "cmake;3.22.1"
+
           export TVM_NDK_CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          if [ ! -x "$TVM_NDK_CC" ]; then
+            export TVM_NDK_CC=$(find "$ANDROID_NDK/toolchains/llvm/prebuilt" -name "aarch64-linux-android*-clang" | sort | head -n 1)
+          fi
+          echo "Using ANDROID_NDK=$ANDROID_NDK"
+          echo "Using TVM_NDK_CC=$TVM_NDK_CC"
+
           export PATH="$ANDROID_HOME/cmake/3.22.1/bin:$HOME/.cargo/bin:$PATH"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TVM_NDK_CC"
+          export GIT_LFS_SKIP_SMUDGE=1
 
           rustup target add aarch64-linux-android
           mkdir -p "$HOME/.cargo"
-          cat <<EOF >> "$HOME/.cargo/config.toml"
+          cat <<EOF > "$HOME/.cargo/config.toml"
           [target.aarch64-linux-android]
           linker = "$TVM_NDK_CC"
           EOF
 
-          python3 -m pip install --upgrade pip
-          python3 -m pip install --pre -U -f https://mlc.ai/wheels mlc-ai-nightly-cpu mlc-llm-nightly-cpu
+          python -m venv "$RUNNER_TEMP/mlc-venv"
+          source "$RUNNER_TEMP/mlc-venv/bin/activate"
+          pip install --upgrade pip
+          pip install --pre -U -f https://mlc.ai/wheels mlc-ai-nightly-cpu mlc-llm-nightly-cpu
+          which mlc_llm
           echo "::endgroup::"
 
-          echo "::group::Clone mlc-ai/mlc-llm sources and package Android mlc4j"
+          echo "::group::Clone mlc-ai/mlc-llm sources and run mlc_llm package"
           MLC_WORK="$RUNNER_TEMP/mlc-build"
           rm -rf "$MLC_WORK"
           mkdir -p "$MLC_WORK"
           git clone --depth 1 --recursive --shallow-submodules https://github.com/mlc-ai/mlc-llm.git "$MLC_WORK/mlc-llm"
           export MLC_LLM_SOURCE_DIR="$MLC_WORK/mlc-llm"
           export TVM_SOURCE_DIR="$MLC_WORK/mlc-llm/3rdparty/tvm"
+          export TVM_HOME="$TVM_SOURCE_DIR"
 
           mkdir -p "$MLC_WORK/pkg"
           cp mlc-package-config.json "$MLC_WORK/pkg/mlc-package-config.json"
           cd "$MLC_WORK/pkg"
-          mlc_llm package --mlc-llm-source-dir "$MLC_LLM_SOURCE_DIR"
+          mlc_llm package
           echo "::endgroup::"
 
           echo "::group::Install compiled libtvm4j_runtime_packed.so, jars, and mlc-app-config.json"
@@ -90,6 +120,7 @@ jobs:
 
           if [ -z "$SO_PATH" ] || [ -z "$TVM_JAR" ]; then
             echo "ERROR: mlc_llm package did not produce libtvm4j_runtime_packed.so or tvm4j_core.jar"
+            find "$MLC_WORK/pkg/dist" -maxdepth 4 || true
             exit 1
           fi
 
@@ -100,7 +131,6 @@ jobs:
             cp "$APP_CFG" app/src/main/assets/mlc-app-config.json
           fi
 
-          # Compile ai.mlc.mlcllm.JSONFFIEngine.java against tvm4j_core.jar into app/libs/mlc4j-ffi.jar
           JSON_FFI_JAVA=$(find "$MLC_LLM_SOURCE_DIR/android/mlc4j" -name "JSONFFIEngine.java" | head -n 1 || true)
           if [ -n "$JSON_FFI_JAVA" ]; then
             mkdir -p "$MLC_WORK/ffi_classes"
@@ -123,16 +153,42 @@ jobs:
             echo "MLC TVM native runtime IS bundled in this APK."
           else
             echo "bundled=false" >> "$GITHUB_OUTPUT"
-            rm -f app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/tvm4j_core.jar app/libs/mlc4j-ffi.jar
+            rm -f app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/tvm4j_core.jar app/libs/mlc4j-ffi.jar app/src/main/assets/mlc-app-config.json
             echo "MLC TVM native runtime was NOT bundled; continuing with LiteRT-LM (NPU/GPU), MediaPipe & llama.cpp."
+            if [ -f "$RUNNER_TEMP/mlc-build.log" ]; then
+              {
+                echo "### MLC-LLM Build Warning"
+                echo "MLC TVM native runtime was skipped due to a build error (last 30 lines):"
+                echo '```'
+                tail -n 30 "$RUNNER_TEMP/mlc-build.log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
+      - name: Restore cached fallback signing keystore (if repo has no keystore file or secret)
+        id: cache-keystore
+        uses: actions/cache@v4
+        with:
+          path: debug.keystore
+          key: localmind-stable-keystore-v1
+
       - name: Prepare consistent signing keystore
+        id: keystore
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: |
-          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-          fi
-          if [ ! -f debug.keystore ]; then
+          set -euo pipefail
+          SOURCE="unknown"
+          if [ -n "${SIGNING_KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$SIGNING_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > debug.keystore
+            SOURCE="GitHub Secret (SIGNING_KEYSTORE_BASE64)"
+          elif [ -f debug.keystore.base64 ] && [ -s debug.keystore.base64 ]; then
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
+            SOURCE="Repo debug.keystore.base64"
+          elif [ -f debug.keystore ] && [ -s debug.keystore ]; then
+            SOURCE="GitHub Actions Cache (stable fallback)"
+          else
             keytool -genkey -v \
               -keystore debug.keystore \
               -storepass android \
@@ -142,7 +198,15 @@ jobs:
               -keysize 2048 \
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
+            SOURCE="Newly generated (will be cached; commit debug.keystore.base64 or set SIGNING_KEYSTORE_BASE64 secret for permanent in-place updates)"
+            echo "::warning::debug.keystore.base64 was not found in repository! Generated a fallback keystore."
           fi
+
+          SHA256=$(keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/ {print $2; exit}')
+          echo "Keystore source: $SOURCE"
+          echo "Signing cert SHA-256: $SHA256"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Compute monotonic version code & changelog
         id: version
@@ -156,14 +220,16 @@ jobs:
             echo "### Що нового у LocalMind v${VERSION_NAME} (build ${VERSION_CODE})"
             echo ""
             if [ "${{ steps.mlc-status.outputs.bundled }}" = "true" ]; then
-              echo "- Вбудовано нативний **MLC-LLM TVM OpenCL/Vulkan GPU runtime** (\`libtvm4j_runtime_packed.so\` + \`mlc4j\`) для Llama-3.2, Qwen2.5, SmolLM2, Gemma-2, Phi-3.5"
+              echo "- Вбудовано нативний **MLC-LLM TVM OpenCL/Vulkan GPU runtime** (\`libtvm4j_runtime_packed.so\` + \`mlc4j\`) для Llama-3.2, Qwen2.5, Gemma-2"
             else
               echo "- Нативні рушії у цьому APK: **LiteRT-LM (QNN NPU / OpenCL-Vulkan GPU)**, **MediaPipe GenAI**, **llama.cpp (GGUF)**"
             fi
             git log -n 6 --pretty=format:"- %s" || true
             echo ""
             echo ""
-            echo "Оновлення встановлюється поверх попередньої версії без видалення даних, чатів та завантажених моделей."
+            echo "Підпис APK (SHA-256): \`${{ steps.keystore.outputs.sha256 }}\` (${{ steps.keystore.outputs.source }})"
+            echo ""
+            echo "Оновлення встановлюється поверх попередньої версії (з тим самим SHA-256 підпису) без видалення даних, чатів та завантажених моделей."
           } > release_notes.md
 
       - name: Set up Gradle 9.3.1
@@ -175,7 +241,23 @@ jobs:
         env:
           APP_VERSION_CODE: ${{ steps.version.outputs.code }}
           APP_VERSION_NAME: ${{ steps.version.outputs.name }}
-        run: gradle :app:assembleDebug --no-daemon
+        run: gradle :app:assembleDebug --no-daemon --no-configuration-cache
+
+      - name: Verify APK versionCode & signing certificate
+        run: |
+          set -euo pipefail
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+
+          BADGING=$("$BUILD_TOOLS/aapt2" dump badging "$APK_PATH" | head -n 1)
+          echo "APK badging: $BADGING"
+          EXPECTED_CODE="versionCode='${{ steps.version.outputs.code }}'"
+          if [[ "$BADGING" != *"$EXPECTED_CODE"* ]]; then
+            echo "ERROR: APK does not contain expected $EXPECTED_CODE!"
+            exit 1
+          fi
+
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK_PATH"
 
       - name: Prepare release APK & checksum
         run: |
