@@ -814,7 +814,7 @@ class MlcNativeEngineBridge(private val context: Context) {
                 "$cName: ${c.message.orEmpty()}"
             }?.takeIf { it.isNotBlank() }
             ?: root.toString()
-        val compactMsg = rawMsg.trim().take(600)
+        val compactMsg = rawMsg.trim().take(2400)
         return "[$stage] $rootName: $compactMsg"
     }
 

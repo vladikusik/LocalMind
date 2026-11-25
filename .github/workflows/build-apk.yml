@@ -42,7 +42,7 @@ jobs:
             app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
             app/libs/mlc4j-runtime.jar
             app/src/main/assets/mlc-app-config.json
-          key: mlc4j-prebuilt-apk-v7
+          key: mlc4j-prebuilt-apk-v8
 
       - name: Extract official prebuilt MLC-LLM TVM native runtime (mlc4j)
         id: build-mlc
@@ -129,104 +129,168 @@ jobs:
             fi
           fi
 
-          # Auto-inspect mlc-chat.apk's real CreateJSONFFIEngine class to extract exact FFI method names & pushArg types!
+          echo "org.apache.tvm classes extracted from mlc-chat.apk:"
+          ls -la "$MLC_WORK/filtered/org/apache/tvm/" || true
+          javap -p -cp "$MLC_WORK/filtered" org.apache.tvm.Function || true
+          javap -p -cp "$MLC_WORK/filtered" org.apache.tvm.Device 2>/dev/null || true
+
+          # Auto-inspect ALL mlc-chat.apk classes that invoke org/apache/tvm/Function or CreateJSONFFIEngine
           python3 - "$MLC_WORK" << 'PY_INSPECT'
           import glob, json, re, subprocess, sys, zipfile
           work = sys.argv[1]
           summary = {
-              "caller_class": "",
+              "caller_classes": [],
               "get_function_names": [],
+              "field_to_func": {},
+              "func_sigs": {},
               "method_push_sigs": {},
               "init_sig": "",
               "reload_sig": "",
-              "raw_excerpt": ""
+              "tvm_push_overloads": []
           }
+
+          # Inspect org.apache.tvm.Function pushArg overloads
+          try:
+              fn_api = subprocess.check_output(["javap", "-p", "-cp", f"{work}/filtered", "org.apache.tvm.Function"], text=True, errors="replace")
+              for ln in fn_api.splitlines():
+                  if "pushArg(" in ln or "call(" in ln:
+                      summary["tvm_push_overloads"].append(ln.strip())
+          except Exception as exc:
+              print(f"javap Function failed: {exc}")
+
+          def token_for_desc(desc, prev_ln):
+              if desc == "I":
+                  return "I"
+              if desc == "J":
+                  return "J"
+              if desc == "Ljava/lang/String;":
+                  if '"opencl"' in prev_ln or '"vulkan"' in prev_ln or '"cpu"' in prev_ln:
+                      return "DEV"
+                  return "S"
+              if desc == "Lorg/apache/tvm/Function;":
+                  return "F"
+              if desc in ("Lorg/apache/tvm/Device;", "Lorg/apache/tvm/TVMContext;"):
+                  return "D"
+              if "aconst_null" in prev_ln:
+                  return "N"
+              return desc
+
           for jp in sorted(glob.glob(f"{work}/classes*.jar")):
               try:
                   with zipfile.ZipFile(jp) as zf:
                       for name in zf.namelist():
-                          if not name.endswith(".class"):
+                          if not name.endswith(".class") or name.startswith("org/apache/tvm/"):
                               continue
                           data = zf.read(name)
-                          if b"CreateJSONFFIEngine" in data or b"init_background_engine" in data:
+                          if (b"CreateJSONFFIEngine" in data or
+                              b"init_background_engine" in data or
+                              b"org/apache/tvm/Function" in data):
                               cls = name[:-6].replace("/", ".")
-                              print(f"Found mlc-chat.apk FFI caller class: {cls} in {jp}")
+                              summary["caller_classes"].append(cls)
+                              print(f"Found mlc-chat.apk TVM caller class: {cls} in {jp}")
                               try:
                                   out = subprocess.check_output(["javap", "-c", "-p", "-cp", jp, cls], text=True, errors="replace")
                               except Exception as exc:
                                   print(f"javap failed for {cls}: {exc}")
                                   continue
-                              print(out[:8000])
-                              if not summary["caller_class"]:
-                                  summary["caller_class"] = cls
-                                  summary["raw_excerpt"] = out[:3000]
+                              print(out[:12000])
                               lines = out.splitlines()
+
+                              # 1. Extract getFunction("...") names and field assignments (putfield)
                               for idx, ln in enumerate(lines):
                                   if "org/apache/tvm/Module.getFunction" in ln:
+                                      fn_name = ""
                                       for back in range(1, 6):
-                                          if idx - back >= 0 and "ldc" in lines[idx - back] and "// String " in lines[idx - back]:
-                                              s = lines[idx - back].split("// String ", 1)[1].strip()
-                                              if s not in summary["get_function_names"]:
-                                                  summary["get_function_names"].append(s)
+                                          if idx - back >= 0 and "// String " in lines[idx - back]:
+                                              fn_name = lines[idx - back].split("// String ", 1)[1].strip()
+                                              if fn_name not in summary["get_function_names"]:
+                                                  summary["get_function_names"].append(fn_name)
                                               break
-                              # Extract per-invoke pushArg type sequences
+                                      if fn_name:
+                                          for fwd in range(1, 6):
+                                              if idx + fwd < len(lines) and "putfield" in lines[idx + fwd] and "// Field " in lines[idx + fwd]:
+                                                  fld = lines[idx + fwd].split("// Field ", 1)[1].strip().split(":")[0]
+                                                  summary["field_to_func"][fld] = fn_name
+                                                  break
+
+                              # 2. Parse EVERY method via "Code:" anchor (works for public/final/private/ctors/throws)
                               cur_method = ""
+                              cur_target_func = ""
                               cur_args = []
                               invoke_idx = 0
                               for idx, ln in enumerate(lines):
-                                  m_hdr = re.match(r"^\s*(?:public|private|protected)?\s*(?:static\s+)?[\w.$<>]+\s+([\w$<>]+)\(([^)]*)\);", ln)
-                                  if m_hdr:
+                                  if ln.strip() == "Code:":
                                       if cur_method and cur_args:
-                                          summary["method_push_sigs"][f"{cur_method}#{invoke_idx}"] = ",".join(cur_args)
-                                      cur_method = f"{m_hdr.group(1)}({m_hdr.group(2)})"
+                                          sig = ",".join(cur_args)
+                                          summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
+                                      prev_hdr = lines[idx - 1].strip() if idx > 0 else "unknown"
+                                      cur_method = prev_hdr.rstrip(";")
+                                      cur_target_func = ""
                                       cur_args = []
                                       invoke_idx = 0
                                       continue
+
+                                  if "getfield" in ln and "// Field " in ln:
+                                      fld = ln.split("// Field ", 1)[1].strip().split(":")[0]
+                                      if fld in summary["field_to_func"]:
+                                          cur_target_func = summary["field_to_func"][fld]
+                                  elif "org/apache/tvm/Module.getFunction" in ln:
+                                      for back in range(1, 5):
+                                          if idx - back >= 0 and "// String " in lines[idx - back]:
+                                              cur_target_func = lines[idx - back].split("// String ", 1)[1].strip()
+                                              break
+
                                   m_push = re.search(r"org/apache/tvm/Function\.pushArg:\(([^)]+)\)", ln)
                                   if m_push:
-                                      desc = m_push.group(1)
                                       prev_ln = lines[idx - 1] if idx > 0 else ""
-                                      if desc == "I":
-                                          cur_args.append("I")
-                                      elif desc == "J":
-                                          cur_args.append("J")
-                                      elif desc == "Ljava/lang/String;":
-                                          cur_args.append("S")
-                                      elif desc == "Lorg/apache/tvm/Function;":
-                                          cur_args.append("F")
-                                      elif desc in ("Lorg/apache/tvm/Device;", "Lorg/apache/tvm/TVMContext;"):
-                                          cur_args.append("D")
-                                      elif "aconst_null" in prev_ln:
-                                          cur_args.append("N")
-                                      else:
-                                          cur_args.append(desc)
+                                      cur_args.append(token_for_desc(m_push.group(1), prev_ln))
+                                  elif "org/apache/tvm/Function.call:" in ln:
+                                      cur_args.append("CALL")
+                                      if cur_method:
+                                          sig = ",".join(cur_args)
+                                          summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
+                                          if cur_target_func:
+                                              summary["func_sigs"][cur_target_func] = sig
+                                          invoke_idx += 1
+                                          cur_args = []
                                   elif "org/apache/tvm/Function.invoke:" in ln:
                                       if cur_method and cur_args:
-                                          summary["method_push_sigs"][f"{cur_method}#{invoke_idx}"] = ",".join(cur_args)
+                                          sig = ",".join(cur_args)
+                                          summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
+                                          if cur_target_func:
+                                              summary["func_sigs"][cur_target_func] = sig
                                           invoke_idx += 1
                                           cur_args = []
                               if cur_method and cur_args:
-                                  summary["method_push_sigs"][f"{cur_method}#{invoke_idx}"] = ",".join(cur_args)
+                                  sig = ",".join(cur_args)
+                                  summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
+                                  if cur_target_func:
+                                      summary["func_sigs"][cur_target_func] = sig
               except Exception as exc:
                   print(f"Skipping jar {jp}: {exc}")
 
-          # Identify init_background_engine pushArg signature (only valid supported tokens containing F)
-          valid_tokens = {"I", "J", "S", "F", "D", "N"}
-          for m_name, sig in summary["method_push_sigs"].items():
-              parts = sig.split(",")
-              if "F" in parts and all(p in valid_tokens for p in parts) and not summary["init_sig"]:
-                  summary["init_sig"] = sig
-              elif sig in ("S", "S,S") and not summary["reload_sig"]:
-                  summary["reload_sig"] = sig
+          valid_tokens = {"I", "J", "S", "DEV", "F", "D", "N"}
+          if "init_background_engine" in summary["func_sigs"]:
+              cand = summary["func_sigs"]["init_background_engine"]
+              if all(p in valid_tokens for p in cand.split(",")):
+                  summary["init_sig"] = cand
+          if not summary["init_sig"]:
+              for m_name, sig in summary["method_push_sigs"].items():
+                  parts = sig.split(",")
+                  if "F" in parts and all(p in valid_tokens for p in parts):
+                      summary["init_sig"] = sig
+                      break
+          if "reload" in summary["func_sigs"]:
+              summary["reload_sig"] = summary["func_sigs"]["reload"]
 
           with open(f"{work}/ffi_summary.json", "w") as f:
               json.dump(summary, f, indent=2)
           print("Extracted mlc-chat.apk FFI summary:")
-          print(json.dumps({k: v for k, v in summary.items() if k != "raw_excerpt"}, indent=2))
+          print(json.dumps(summary, indent=2))
           PY_INSPECT
 
           DETECTED_INIT_SIG=$(python3 -c "import json; d=json.load(open('$MLC_WORK/ffi_summary.json')); print(d.get('init_sig',''))" || echo "")
-          DETECTED_FFI_INFO=$(python3 -c "import json; d=json.load(open('$MLC_WORK/ffi_summary.json')); print(('cls=' + d.get('caller_class','') + '; funcs=' + ','.join(d.get('get_function_names',[])) + '; sigs=' + str(d.get('method_push_sigs',{}))).replace('\"','').replace('\n',' ')[:450])" || echo "")
+          DETECTED_FFI_INFO=$(python3 -c "import json; d=json.load(open('$MLC_WORK/ffi_summary.json')); print(('init=' + d.get('init_sig','') + '; fnSigs=' + str(d.get('func_sigs',{})) + '; funcs=' + ','.join(d.get('get_function_names',[])) + '; methodSigs=' + str(d.get('method_push_sigs',{})) + '; pushApi=' + '|'.join(d.get('tvm_push_overloads',[]))).replace('\"','').replace('\n',' ')[:750])" || echo "")
           echo "Detected init sig: $DETECTED_INIT_SIG"
           echo "Detected FFI info: $DETECTED_FFI_INFO"
 
@@ -245,6 +309,8 @@ jobs:
           import java.util.LinkedHashSet;
           import java.util.List;
           import java.util.Set;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
 
           public class JSONFFIEngine {
               public interface KotlinFunction {
@@ -253,6 +319,8 @@ jobs:
 
               public static final String DETECTED_INIT_SIG = "__DETECTED_INIT_SIG__";
               public static final String DETECTED_FFI_INFO = "__DETECTED_FFI_INFO__";
+
+              private static final Pattern REQUIRES_ARGS_PATTERN = Pattern.compile("requires\\s+(\\d+)\\s+arguments");
 
               private final Module jsonFFIEngine;
               private Function reloadFunc;
@@ -356,10 +424,19 @@ jobs:
                   initBackgroundEngineForModel(deviceType, deviceId, "", "", "", requestStreamCallback);
               }
 
+              private static String deviceTypeName(int deviceType) {
+                  switch (deviceType) {
+                      case 4: return "opencl";
+                      case 7: return "vulkan";
+                      case 1: return "cpu";
+                      default: return "opencl";
+                  }
+              }
+
               /**
                * Initializes TVM JSONFFIEngine background engine using the exact ABI signature
-               * detected from mlc-chat.apk bytecode, with automatic fresh-Function fallback across
-               * all known MLC-LLM C++ init_background_engine overloads.
+               * detected from mlc-chat.apk bytecode, with leak-free fallback across all known
+               * 3-arg and N-arg MLC-LLM C++ init_background_engine overloads.
                *
                * @return true if init_background_engine already loaded the model (no separate reload needed)
                */
@@ -386,27 +463,50 @@ jobs:
                   if (DETECTED_INIT_SIG != null && !DETECTED_INIT_SIG.isEmpty()) {
                       order.add(DETECTED_INIT_SIG);
                   }
-                  // Known MLC-LLM init_background_engine signatures across 2024-2026 releases:
-                  order.add("F");                // (callback)
-                  order.add("I,F");              // (deviceType, callback)
-                  order.add("D,F");              // (Device, callback)
+                  // Prioritize 3-arg signatures (mlc.json_ffi::init_background_engine requires 3 args in mlc-chat.apk):
+                  order.add("DEV,I,F");          // ("opencl", deviceId, callback)
                   if (hasModelInfo) {
-                      order.add("S,F");          // (engineConfigJSON, callback)
-                      order.add("S,I,I,F");      // (engineConfigJSON, deviceType, deviceId, callback)
-                      order.add("I,I,S,F");      // (deviceType, deviceId, engineConfigJSON, callback)
-                      order.add("S,S,I,I,F");    // (modelPath, modelLib, deviceType, deviceId, callback)
-                      order.add("I,I,S,S,F");    // (deviceType, deviceId, modelPath, modelLib, callback)
+                      order.add("S,I,F");        // (engineConfigJSON, deviceId, callback)
                       order.add("S,S,F");        // (modelPath, modelLib, callback)
-                      order.add("D,S,F");        // (Device, engineConfigJSON, callback)
-                      order.add("S,D,F");        // (engineConfigJSON, Device, callback)
                       order.add("I,S,F");        // (deviceType, engineConfigJSON, callback)
                   }
+                  order.add("F,I,I");            // (callback, deviceType, deviceId)
+                  order.add("I,F,I");            // (deviceType, callback, deviceId)
+                  order.add("F,DEV,I");          // (callback, "opencl", deviceId)
+                  order.add("D,I,F");            // (Device, deviceId, callback)
+                  order.add("I,D,F");            // (deviceType, Device, callback)
+                  if (hasModelInfo) {
+                      order.add("D,S,F");        // (Device, engineConfigJSON, callback)
+                      order.add("S,D,F");        // (engineConfigJSON, Device, callback)
+                  }
                   order.add("I,I,F");            // (deviceType, deviceId, callback)
-                  order.add("I,I,F,N");          // (deviceType, deviceId, callback, null trace)
+                  order.add("D,F,N");            // (Device, callback, null)
+                  order.add("I,F,N");            // (deviceType, callback, null)
+                  order.add("DEV,F,N");          // ("opencl", callback, null)
+                  if (hasModelInfo) {
+                      order.add("S,F,N");        // (engineConfigJSON, callback, null)
+                  }
+                  // Non-3-arg signatures (auto-skipped if TVM reports exact required arity != parts.length)
+                  order.add("D,F");
+                  order.add("F");
+                  order.add("I,F");
+                  if (hasModelInfo) {
+                      order.add("S,F");
+                      order.add("S,I,I,F");
+                      order.add("I,I,S,F");
+                      order.add("S,S,I,I,F");
+                      order.add("I,I,S,S,F");
+                  }
+                  order.add("I,I,F,N");
 
+                  int learnedRequiredArgs = -1;
                   List<String> attemptErrors = new ArrayList<>();
                   for (String sig : order) {
-                      if ((sig.contains("S")) && !hasModelInfo) {
+                      String[] parts = sig.split(",");
+                      if (learnedRequiredArgs > 0 && parts.length != learnedRequiredArgs) {
+                          continue;
+                      }
+                      if (sig.contains("S") && !hasModelInfo) {
                           continue;
                       }
                       Function fn = tryGetFunc("init_background_engine");
@@ -414,7 +514,7 @@ jobs:
                           throw new RuntimeException("TVM JSONFFIEngine missing init_background_engine");
                       }
                       try {
-                          boolean loadedModel = invokeInitWithSig(fn, sig, deviceType, deviceId, modelPath, modelLib, engineConfigJSON, callback);
+                          boolean loadedModel = invokeInitWithSig(fn, parts, deviceType, deviceId, modelPath, modelLib, engineConfigJSON, callback);
                           resolvePostInitFunctions();
                           this.modelLoadedByInit = loadedModel && (reloadFunc == null);
                           return this.modelLoadedByInit;
@@ -423,6 +523,15 @@ jobs:
                           int nl = msg.indexOf('\n');
                           String shortMsg = nl > 0 ? msg.substring(0, nl) : msg;
                           attemptErrors.add(sig + " => " + shortMsg);
+
+                          Matcher m = REQUIRES_ARGS_PATTERN.matcher(msg);
+                          if (m.find()) {
+                              try {
+                                  learnedRequiredArgs = Integer.parseInt(m.group(1));
+                              } catch (NumberFormatException ignored) {
+                              }
+                          }
+
                           // Only retry on TVM arg count / arg type mismatch; propagate real GPU/model errors
                           boolean isArgMismatch =
                               msg.contains("type_code_") ||
@@ -431,6 +540,7 @@ jobs:
                               msg.contains("expected int") ||
                               msg.contains("expected PackedFunc") ||
                               msg.contains("args.size()") ||
+                              msg.contains("requires ") ||
                               msg.contains("argument") ||
                               msg.contains("TypeError") ||
                               (t instanceof IllegalArgumentException);
@@ -441,51 +551,69 @@ jobs:
                   }
 
                   throw new RuntimeException(
-                      "init_background_engine failed all ABI signatures (" + String.join(" ; ", attemptErrors) +
-                      ") | funcs=" + probeAvailableFunctions() + " | " + DETECTED_FFI_INFO
+                      "init_background_engine ABI mismatch | " + DETECTED_FFI_INFO +
+                      " | funcs=" + probeAvailableFunctions() +
+                      " | attempts: " + String.join(" ; ", attemptErrors)
                   );
               }
 
-              private void pushDeviceArg(Function fn, int deviceType, int deviceId) {
+              private Object[] resolveDeviceAndPushMethod(int deviceType, int deviceId) {
                   String[] deviceClasses = new String[] {
                       "org.apache.tvm.Device",
                       "org.apache.tvm.TVMContext"
                   };
+                  String factoryName = deviceTypeName(deviceType);
                   Throwable lastErr = null;
                   for (String clsName : deviceClasses) {
                       try {
                           Class<?> cls = Class.forName(clsName);
-                          Constructor<?> ctor = cls.getConstructor(int.class, int.class);
-                          Object dev = ctor.newInstance(deviceType, deviceId);
                           Method push = Function.class.getMethod("pushArg", cls);
-                          push.invoke(fn, dev);
-                          return;
+                          Object dev = null;
+                          try {
+                              Constructor<?> ctor = cls.getDeclaredConstructor(int.class, int.class);
+                              ctor.setAccessible(true);
+                              dev = ctor.newInstance(deviceType, deviceId);
+                          } catch (Throwable ignored) {
+                          }
+                          if (dev == null) {
+                              try {
+                                  Method factory = cls.getMethod(factoryName, int.class);
+                                  dev = factory.invoke(null, deviceId);
+                              } catch (Throwable ignored) {
+                              }
+                          }
+                          if (dev == null) {
+                              try {
+                                  Method factory0 = cls.getMethod(factoryName);
+                                  dev = factory0.invoke(null);
+                              } catch (Throwable ignored) {
+                              }
+                          }
+                          if (dev != null) {
+                              return new Object[] { dev, push };
+                          }
                       } catch (Throwable t) {
                           lastErr = t;
                       }
                   }
-                  throw new IllegalArgumentException("Device class unavailable in TVM4J: " + (lastErr != null ? lastErr.getMessage() : "unknown"));
+                  throw new IllegalArgumentException("Device unavailable: " + (lastErr != null ? lastErr.getMessage() : "no factory/ctor"));
               }
 
-              private void pushNullArg(Function fn) {
+              private Method resolveNullPushMethod() {
                   try {
-                      Method push = Function.class.getMethod("pushArg", Object.class);
-                      push.invoke(fn, new Object[] { null });
-                      return;
+                      return Function.class.getMethod("pushArg", Object.class);
                   } catch (Throwable ignored) {
                   }
                   try {
-                      Method push = Function.class.getMethod("pushArg", TVMValue.class);
-                      push.invoke(fn, new Object[] { null });
-                      return;
+                      return Function.class.getMethod("pushArg", TVMValue.class);
                   } catch (Throwable ignored) {
                   }
-                  throw new IllegalArgumentException("Function.pushArg(null) overload unavailable in TVM4J");
+                  throw new IllegalArgumentException("Function.pushArg(null) unavailable");
               }
 
               private boolean invokeInitWithSig(
                   Function fn,
-                  String sig,
+                  String[] parts,
                   int deviceType,
                   int deviceId,
                   String modelPath,
@@ -493,43 +621,77 @@ jobs:
                   String engineConfigJSON,
                   Function callback
               ) {
-                  String[] parts = sig.split(",");
-                  int intIdx = 0;
+                  // Pre-resolve reflective Device/null args BEFORE pushing anything so we NEVER leak TVM4J ThreadLocal args!
+                  Object[] preDevice = null;
+                  Method preNullPush = null;
                   int strCount = 0;
                   for (String p : parts) {
-                      if ("S".equals(p)) strCount++;
-                  }
-                  int strIdx = 0;
-                  for (String p : parts) {
-                      switch (p) {
-                          case "I":
-                              fn.pushArg(intIdx == 0 ? deviceType : deviceId);
-                              intIdx++;
-                              break;
-                          case "J":
-                              fn.pushArg((long) (intIdx == 0 ? deviceType : deviceId));
-                              intIdx++;
-                              break;
-                          case "D":
-                              pushDeviceArg(fn, deviceType, deviceId);
-                              break;
-                          case "F":
-                              fn.pushArg(callback);
-                              break;
-                          case "N":
-                              pushNullArg(fn);
-                              break;
-                          case "S":
-                              if (strCount == 1) {
-                                  fn.pushArg(engineConfigJSON);
-                              } else {
-                                  fn.pushArg(strIdx == 0 ? modelPath : modelLib);
-                              }
-                              strIdx++;
-                              break;
-                          default:
-                              throw new IllegalArgumentException("Unsupported arg token in sig: " + p);
+                      if ("S".equals(p)) {
+                          strCount++;
+                      } else if ("D".equals(p) && preDevice == null) {
+                          preDevice = resolveDeviceAndPushMethod(deviceType, deviceId);
+                      } else if ("N".equals(p) && preNullPush == null) {
+                          preNullPush = resolveNullPushMethod();
+                      } else if (!("I".equals(p) || "J".equals(p) || "DEV".equals(p) || "F".equals(p) || "D".equals(p) || "N".equals(p))) {
+                          throw new IllegalArgumentException("Unsupported token: " + p);
                       }
+                  }
+
+                  int pushed = 0;
+                  int intIdx = 0;
+                  int strIdx = 0;
+                  try {
+                      for (String p : parts) {
+                          switch (p) {
+                              case "I":
+                                  fn.pushArg(intIdx == 0 ? deviceType : deviceId);
+                                  intIdx++;
+                                  pushed++;
+                                  break;
+                              case "J":
+                                  fn.pushArg((long) (intIdx == 0 ? deviceType : deviceId));
+                                  intIdx++;
+                                  pushed++;
+                                  break;
+                              case "DEV":
+                                  fn.pushArg(deviceTypeName(deviceType));
+                                  pushed++;
+                                  break;
+                              case "D":
+                                  ((Method) preDevice[1]).invoke(fn, preDevice[0]);
+                                  pushed++;
+                                  break;
+                              case "F":
+                                  fn.pushArg(callback);
+                                  pushed++;
+                                  break;
+                              case "N":
+                                  preNullPush.invoke(fn, new Object[] { null });
+                                  pushed++;
+                                  break;
+                              case "S":
+                                  if (strCount == 1) {
+                                      fn.pushArg(engineConfigJSON);
+                                  } else {
+                                      fn.pushArg(strIdx == 0 ? modelPath : modelLib);
+                                  }
+                                  strIdx++;
+                                  pushed++;
+                                  break;
+                          }
+                      }
+                  } catch (Throwable pushErr) {
+                      // Flush any partially-pushed TVM4J ThreadLocal args before propagating
+                      if (pushed > 0) {
+                          try {
+                              fn.invoke();
+                          } catch (Throwable ignored) {
+                          }
+                      }
+                      if (pushErr instanceof RuntimeException) {
+                          throw (RuntimeException) pushErr;
+                      }
+                      throw new RuntimeException(pushErr);
                   }
                   fn.invoke();
                   return strCount > 0;
