@@ -220,11 +220,12 @@ class MlcNativeEngineBridge(private val context: Context) {
                     activeDeviceLabel = if (status.hasOpenCl) "TVM OpenCL GPU" else "TVM GPU"
                 }
 
-                // 5. Reload model weights & compiled SystemLib if model changed
+                // 5. Ensure mlc-chat-config.json has all classic llm_chat.cc required fields & reload
                 if (chatModuleModelDir != modelDir.absolutePath || chatModuleModelLib != cleanLib) {
                     if (chatModuleModelDir != null) {
                         runCatching { findMethod(chatModuleClass, "unload")?.invoke(module) }
                     }
+                    ensureClassicChatModuleConfig(modelDir, cleanLib)
                     reloadChatModuleResilient(chatModuleClass, module, cleanLib, modelDir.absolutePath)
                     chatModuleModelDir = modelDir.absolutePath
                     chatModuleModelLib = cleanLib
@@ -358,6 +359,172 @@ class MlcNativeEngineBridge(private val context: Context) {
         }
     }
 
+    /**
+     * Ensures `mlc-chat-config.json` contains every key required by classic `mlc-llm/cpp/llm_chat.cc`
+     * (`ChatModule.reload` with `partial_update == false`), while keeping an untouched backup in
+     * `mlc-chat-config.orig.json`.
+     *
+     * Newer HuggingFace MLC repos (e.g. `Llama-3.2-3B-Instruct-q4f16_1-MLC`) omit legacy fields
+     * (`mean_gen_len`, `max_gen_len`, `shift_fill_factor`, `max_window_size`, penalties) and store
+     * `conv_template` as a nested JSON object instead of a string + `conv_config`.
+     */
+    private fun ensureClassicChatModuleConfig(
+        modelDir: File,
+        cleanLib: String,
+        useMinimalLmTemplate: Boolean = false
+    ) {
+        val configFile = File(modelDir, "mlc-chat-config.json")
+        if (!configFile.exists()) return
+        val backupFile = File(modelDir, "mlc-chat-config.orig.json")
+        if (!backupFile.exists()) {
+            runCatching { configFile.copyTo(backupFile, overwrite = false) }
+        }
+        val sourceFile = if (backupFile.exists() && backupFile.length() > 0L) backupFile else configFile
+        val root = runCatching { JSONObject(sourceFile.readText()) }.getOrNull() ?: return
+        val modelCfg = root.optJSONObject("model_config")
+
+        if (root.optString("model_lib").isBlank()) {
+            root.put("model_lib", cleanLib)
+        }
+        if (root.optString("local_id").isBlank()) {
+            root.put("local_id", modelDir.name)
+        }
+        if (!root.has("temperature") || root.isNull("temperature")) {
+            root.put("temperature", 0.7)
+        }
+        if (!root.has("repetition_penalty") || root.isNull("repetition_penalty")) {
+            root.put("repetition_penalty", 1.0)
+        }
+        if (!root.has("presence_penalty") || root.isNull("presence_penalty")) {
+            root.put("presence_penalty", 0.0)
+        }
+        if (!root.has("frequency_penalty") || root.isNull("frequency_penalty")) {
+            root.put("frequency_penalty", 0.0)
+        }
+        if (!root.has("top_p") || root.isNull("top_p")) {
+            root.put("top_p", 0.95)
+        }
+        if (!root.has("mean_gen_len") || root.isNull("mean_gen_len")) {
+            root.put("mean_gen_len", 128)
+        }
+        if (!root.has("max_gen_len") || root.isNull("max_gen_len")) {
+            root.put("max_gen_len", 512)
+        }
+        if (!root.has("shift_fill_factor") || root.isNull("shift_fill_factor")) {
+            root.put("shift_fill_factor", 0.3)
+        }
+
+        val ctxWindow = root.optInt(
+            "context_window_size",
+            modelCfg?.optInt("context_window_size", 4096) ?: 4096
+        ).coerceIn(512, 4096)
+        if (!root.has("context_window_size") || root.optInt("context_window_size", 0) > 4096) {
+            root.put("context_window_size", ctxWindow)
+        }
+        if (!root.has("max_window_size") || root.isNull("max_window_size")) {
+            root.put("max_window_size", ctxWindow)
+        }
+        val prefillChunk = root.optInt(
+            "prefill_chunk_size",
+            modelCfg?.optInt("prefill_chunk_size", 512) ?: 512
+        ).coerceIn(128, 512)
+        root.put("prefill_chunk_size", prefillChunk)
+
+        if (!root.has("sliding_window_size") || root.isNull("sliding_window_size")) {
+            root.put("sliding_window_size", modelCfg?.optInt("sliding_window_size", -1) ?: -1)
+        }
+        if (!root.has("attention_sink_size") || root.isNull("attention_sink_size")) {
+            root.put("attention_sink_size", modelCfg?.optInt("attention_sink_size", 0) ?: 0)
+        }
+        if (!root.has("vocab_size") && modelCfg != null && modelCfg.has("vocab_size")) {
+            root.put("vocab_size", modelCfg.optInt("vocab_size"))
+        }
+        if (!root.has("pad_token_id") || root.isNull("pad_token_id")) {
+            root.put("pad_token_id", modelCfg?.optInt("pad_token_id", 0) ?: 0)
+        }
+        if (!root.has("bos_token_id") || root.isNull("bos_token_id")) {
+            root.put("bos_token_id", modelCfg?.optInt("bos_token_id", 1) ?: 1)
+        }
+        if (!root.has("tokenizer_files") || root.optJSONArray("tokenizer_files") == null) {
+            val tokArr = JSONArray()
+            listOf("tokenizer.json", "tokenizer.model", "tokenizer_config.json").forEach { name ->
+                if (File(modelDir, name).exists()) tokArr.put(name)
+            }
+            if (tokArr.length() > 0) root.put("tokenizer_files", tokArr)
+        }
+
+        // Classic llm_chat.cc expects `conv_template` to be a String (and optional `conv_config` Object).
+        val convObj = root.optJSONObject("conv_template")
+        if (useMinimalLmTemplate) {
+            root.put("conv_template", "LM")
+            root.remove("conv_config")
+        } else if (convObj != null) {
+            val sepsArr = convObj.optJSONArray("seps") ?: JSONArray().put("\n")
+            val sep0 = if (sepsArr.length() > 0) sepsArr.optString(0, "") else ""
+            val sysTemplate = convObj.optString("system_template", "{system_message}")
+            val sysMessage = convObj.optString("system_message", "")
+            var resolvedSys = sysTemplate.replace("{system_message}", sysMessage)
+            if (sep0.isNotEmpty() && resolvedSys.endsWith(sep0)) {
+                resolvedSys = resolvedSys.removeSuffix(sep0)
+            }
+
+            val rolesArray = JSONArray()
+            val rolesObj = convObj.optJSONObject("roles")
+            val existingRolesArr = convObj.optJSONArray("roles")
+            if (rolesObj != null) {
+                rolesArray.put(rolesObj.optString("user", "User"))
+                rolesArray.put(rolesObj.optString("assistant", "Assistant"))
+            } else if (existingRolesArr != null && existingRolesArr.length() >= 2) {
+                rolesArray.put(existingRolesArr.optString(0, "User"))
+                rolesArray.put(existingRolesArr.optString(1, "Assistant"))
+            } else {
+                rolesArray.put("User")
+                rolesArray.put("Assistant")
+            }
+
+            val stopStrArr = convObj.optJSONArray("stop_str")
+            val stopStr = when {
+                stopStrArr != null && stopStrArr.length() > 0 -> stopStrArr.optString(0, "")
+                else -> convObj.optString("stop_str", "")
+            }
+
+            val stopTokens = convObj.optJSONArray("stop_token_ids")
+                ?: convObj.optJSONArray("stop_tokens")
+                ?: run {
+                    val eosArr = root.optJSONArray("eos_token_id")
+                    if (eosArr != null && eosArr.length() > 0) {
+                        eosArr
+                    } else {
+                        val eosInt = root.optInt("eos_token_id", -1)
+                        if (eosInt >= 0) JSONArray().put(eosInt) else JSONArray()
+                    }
+                }
+
+            val addBos = (convObj.optJSONArray("system_prefix_token_ids")?.length() ?: 0) > 0 ||
+                convObj.optBoolean("add_bos", true)
+
+            val convConfig = JSONObject().apply {
+                put("system", resolvedSys)
+                put("roles", rolesArray)
+                put("seps", sepsArr)
+                put("role_msg_sep", convObj.optString("role_content_sep", convObj.optString("role_msg_sep", ": ")))
+                put("role_empty_sep", convObj.optString("role_empty_sep", ":"))
+                if (stopStr.isNotEmpty()) put("stop_str", stopStr)
+                if (stopTokens.length() > 0) put("stop_tokens", stopTokens)
+                put("add_bos", addBos)
+                put("offset", 0)
+                put("messages", JSONArray())
+            }
+
+            root.put("conv_template", "vicuna_v1.1")
+            root.put("conv_config", convConfig)
+        } else if (root.optString("conv_template").isBlank()) {
+            root.put("conv_template", "LM")
+        }
+
+        configFile.writeText(root.toString(2))
+    }
+
     private fun reloadChatModuleResilient(
         chatModuleClass: Class<*>,
         module: Any,
@@ -381,19 +548,35 @@ class MlcNativeEngineBridge(private val context: Context) {
         } catch (t: Throwable) {
             val root = unwrapThrowable(t)
             val msg = root.message.orEmpty()
-            // Retry with swapped argument order if SystemLib failed on a directory path
-            val looksLikeSwappedArgs = msg.contains("SystemLib", ignoreCase = true) ||
-                msg.contains(modelPath, ignoreCase = false) ||
-                msg.contains("not found", ignoreCase = true) ||
-                msg.contains("Cannot open", ignoreCase = true)
+
+            // If classic Conversation::LoadJSONOverride rejected a field in conv_config, retry with minimal LM template
+            val looksLikeConvConfigError = msg.contains("conv_template", ignoreCase = true) ||
+                msg.contains("conv_config", ignoreCase = true) ||
+                msg.contains("conversation", ignoreCase = true)
+            if (looksLikeConvConfigError) {
+                try {
+                    ensureClassicChatModuleConfig(File(modelPath), cleanLib, useMinimalLmTemplate = true)
+                    reloadMethod.invoke(module, primaryFirst, primarySecond)
+                    return
+                } catch (tConv: Throwable) {
+                    val convRoot = unwrapThrowable(tConv)
+                    throw IOException(formatThrowable("ChatModule.reload(lib=$cleanLib, LM)", convRoot), convRoot)
+                }
+            }
+
+            // Retry with swapped argument order only if SystemLib / file-open failed (not JSON key errors)
+            val looksLikeSwappedArgs = !msg.contains("Key \"", ignoreCase = true) && (
+                msg.contains("SystemLib", ignoreCase = true) ||
+                    msg.contains("Cannot open", ignoreCase = true) ||
+                    msg.contains("No such file", ignoreCase = true)
+                )
             if (looksLikeSwappedArgs) {
                 val altFirst = if (firstArgIsModelLib) modelPath else cleanLib
                 val altSecond = if (firstArgIsModelLib) cleanLib else modelPath
                 try {
                     reloadMethod.invoke(module, altFirst, altSecond)
                     return
-                } catch (t2: Throwable) {
-                    // Also try underscore-normalized prefix if SystemLib expected trailing underscore
+                } catch (_: Throwable) {
                     val normalizedLib = cleanLib.replace('-', '_').trimEnd('_') + "_"
                     if (normalizedLib != cleanLib) {
                         try {
