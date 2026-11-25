@@ -42,7 +42,7 @@ jobs:
             app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
             app/libs/mlc4j-runtime.jar
             app/src/main/assets/mlc-app-config.json
-          key: mlc4j-prebuilt-apk-v5
+          key: mlc4j-prebuilt-apk-v6
 
       - name: Extract official prebuilt MLC-LLM TVM native runtime (mlc4j)
         id: build-mlc
@@ -83,7 +83,7 @@ jobs:
           echo "Dynamic dependencies (NEEDED) of libtvm4j_runtime_packed.so:"
           readelf -d app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep NEEDED || true
           echo "Sample JNI/FFI symbols in libtvm4j_runtime_packed.so:"
-          strings app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep -E "CreateJSONFFIEngine|Java_org_apache_tvm" | head -n 20 || true
+          strings app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep -E "CreateJSONFFIEngine|init_background_engine|run_background_loop|chat_completion|Java_org_apache_tvm" | head -n 30 || true
 
           APP_CFG=$(find "$MLC_WORK/apk/assets" -name "mlc-app-config.json" | head -n 1 || true)
           if [ -n "$APP_CFG" ] && [ -s "$APP_CFG" ]; then
@@ -106,6 +106,23 @@ jobs:
             "$D2J_BIN" -f -o "$MLC_WORK/${base}.jar" "$dex"
             unzip -qo "$MLC_WORK/${base}.jar" "org/apache/tvm/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
           done
+
+          # Inspect the mlc-chat.apk class that calls CreateJSONFFIEngine for CI diagnostics
+          python3 - "$MLC_WORK" << 'PY_INSPECT' || true
+          import glob, subprocess, sys, zipfile
+          work = sys.argv[1]
+          for jp in sorted(glob.glob(f"{work}/classes*.jar")):
+              with zipfile.ZipFile(jp) as zf:
+                  for name in zf.namelist():
+                      if not name.endswith(".class"):
+                          continue
+                      data = zf.read(name)
+                      if b"CreateJSONFFIEngine" in data:
+                          cls = name[:-6].replace("/", ".")
+                          print(f"Found mlc-chat.apk JSONFFIEngine caller class: {cls} in {jp}")
+                          out = subprocess.check_output(["javap", "-c", "-p", "-cp", jp, cls], text=True, errors="replace")
+                          print(out[:4000])
+          PY_INSPECT
 
           if [ ! -f "$MLC_WORK/filtered/org/apache/tvm/Function.class" ] || [ ! -f "$MLC_WORK/filtered/org/apache/tvm/LibInfo.class" ]; then
             echo "ERROR: org/apache/tvm/Function.class or LibInfo.class not found in mlc-chat.apk dex!"
@@ -145,14 +162,15 @@ jobs:
 
               private final Module jsonFFIEngine;
               private final Function initBackgroundEngineFunc;
-              private final Function reloadFunc;
-              private final Function unloadFunc;
-              private final Function resetFunc;
-              private final Function chatCompletionFunc;
-              private final Function abortFunc;
-              private final Function runBackgroundLoopFunc;
-              private final Function runBackgroundStreamBackLoopFunc;
-              private final Function exitBackgroundLoopFunc;
+              private Function reloadFunc;
+              private Function unloadFunc;
+              private Function resetFunc;
+              private Function chatCompletionFunc;
+              private Function abortFunc;
+              private Function runBackgroundLoopFunc;
+              private Function runBackgroundStreamBackLoopFunc;
+              private Function exitBackgroundLoopFunc;
+              private Function getLastErrorFunc;
 
               public JSONFFIEngine() {
                   Function createFunc = Function.getFunction("mlc.json_ffi.CreateJSONFFIEngine");
@@ -164,23 +182,76 @@ jobs:
                       throw new RuntimeException("mlc.json_ffi.CreateJSONFFIEngine returned null");
                   }
                   this.jsonFFIEngine = modVal.asModule();
-                  this.initBackgroundEngineFunc = requireFunc(jsonFFIEngine, "init_background_engine");
-                  this.reloadFunc = requireFunc(jsonFFIEngine, "reload");
-                  this.unloadFunc = requireFunc(jsonFFIEngine, "unload");
-                  this.resetFunc = requireFunc(jsonFFIEngine, "reset");
-                  this.chatCompletionFunc = requireFunc(jsonFFIEngine, "chat_completion");
-                  this.abortFunc = requireFunc(jsonFFIEngine, "abort");
-                  this.runBackgroundLoopFunc = requireFunc(jsonFFIEngine, "run_background_loop");
-                  this.runBackgroundStreamBackLoopFunc = requireFunc(jsonFFIEngine, "run_background_stream_back_loop");
-                  this.exitBackgroundLoopFunc = requireFunc(jsonFFIEngine, "exit_background_loop");
+                  // IMPORTANT: Only resolve init_background_engine in constructor!
+                  // In MLC-LLM C++ JSONFFIEngineImpl, reload/unload/reset/loops may be delegated
+                  // to the internal ThreadedEngine created inside init_background_engine.
+                  this.initBackgroundEngineFunc = tryGetFunc("init_background_engine");
+                  if (this.initBackgroundEngineFunc == null) {
+                      throw new RuntimeException("TVM JSONFFIEngine missing 'init_background_engine'. Found: " + probeAvailableFunctions());
+                  }
               }
 
-              private static Function requireFunc(Module mod, String name) {
-                  Function fn = mod.getFunction(name);
-                  if (fn == null) {
-                      throw new RuntimeException("TVM JSONFFIEngine missing function '" + name + "'");
+              private Function tryGetFunc(String name) {
+                  try {
+                      Function fn = jsonFFIEngine.getFunction(name);
+                      if (fn != null) return fn;
+                  } catch (Throwable ignored) {
                   }
-                  return fn;
+                  try {
+                      Function fn = jsonFFIEngine.getFunction(name, true);
+                      if (fn != null) return fn;
+                  } catch (Throwable ignored) {
+                  }
+                  return null;
+              }
+
+              private Function tryGetAnyFunc(String... names) {
+                  for (String name : names) {
+                      Function fn = tryGetFunc(name);
+                      if (fn != null) return fn;
+                  }
+                  return null;
+              }
+
+              private String probeAvailableFunctions() {
+                  String[] candidates = new String[] {
+                      "init_background_engine",
+                      "reload",
+                      "reload_model",
+                      "reload_engine",
+                      "unload",
+                      "reset",
+                      "chat_completion",
+                      "abort",
+                      "get_last_error",
+                      "run_background_loop",
+                      "run_background_stream_back_loop",
+                      "exit_background_loop",
+                      "init_threaded_engine",
+                      "add_request",
+                      "abort_request",
+                      "debug_call_func_on_all_worker"
+                  };
+                  StringBuilder sb = new StringBuilder();
+                  for (String c : candidates) {
+                      if (tryGetFunc(c) != null) {
+                          if (sb.length() > 0) sb.append(", ");
+                          sb.append(c);
+                      }
+                  }
+                  return sb.length() > 0 ? sb.toString() : "(none of known names)";
+              }
+
+              private void resolvePostInitFunctions() {
+                  if (reloadFunc == null) reloadFunc = tryGetAnyFunc("reload", "reload_model", "reload_engine");
+                  if (unloadFunc == null) unloadFunc = tryGetFunc("unload");
+                  if (resetFunc == null) resetFunc = tryGetFunc("reset");
+                  if (chatCompletionFunc == null) chatCompletionFunc = tryGetFunc("chat_completion");
+                  if (abortFunc == null) abortFunc = tryGetFunc("abort");
+                  if (runBackgroundLoopFunc == null) runBackgroundLoopFunc = tryGetFunc("run_background_loop");
+                  if (runBackgroundStreamBackLoopFunc == null) runBackgroundStreamBackLoopFunc = tryGetFunc("run_background_stream_back_loop");
+                  if (exitBackgroundLoopFunc == null) exitBackgroundLoopFunc = tryGetFunc("exit_background_loop");
+                  if (getLastErrorFunc == null) getLastErrorFunc = tryGetFunc("get_last_error");
               }
 
               public void initBackgroundEngine(KotlinFunction requestStreamCallback) {
@@ -199,42 +270,97 @@ jobs:
                       }
                   });
                   initBackgroundEngineFunc.pushArg(deviceType).pushArg(deviceId).pushArg(callback).invoke();
+                  resolvePostInitFunctions();
               }
 
               public void reload(String engineConfigJSON) {
+                  resolvePostInitFunctions();
+                  if (reloadFunc == null) {
+                      throw new RuntimeException("TVM JSONFFIEngine has no 'reload' function after init_background_engine. Available: " + probeAvailableFunctions());
+                  }
                   reloadFunc.pushArg(engineConfigJSON).invoke();
               }
 
               public void reload(String modelPath, String modelLib) {
+                  resolvePostInitFunctions();
+                  if (reloadFunc == null) {
+                      throw new RuntimeException("TVM JSONFFIEngine has no 'reload' function after init_background_engine. Available: " + probeAvailableFunctions());
+                  }
                   reloadFunc.pushArg(modelPath).pushArg(modelLib).invoke();
               }
 
               public void unload() {
-                  unloadFunc.invoke();
+                  resolvePostInitFunctions();
+                  if (unloadFunc != null) {
+                      unloadFunc.invoke();
+                  }
               }
 
               public void reset() {
-                  resetFunc.invoke();
+                  resolvePostInitFunctions();
+                  if (resetFunc != null) {
+                      resetFunc.invoke();
+                  }
               }
 
               public void chatCompletion(String requestJSON, String requestId) {
-                  chatCompletionFunc.pushArg(requestJSON).pushArg(requestId).invoke();
+                  resolvePostInitFunctions();
+                  if (chatCompletionFunc == null) {
+                      throw new RuntimeException("TVM JSONFFIEngine has no 'chat_completion' function. Available: " + probeAvailableFunctions());
+                  }
+                  TVMValue ret = chatCompletionFunc.pushArg(requestJSON).pushArg(requestId).invoke();
+                  if (ret != null) {
+                      try {
+                          if (ret.asLong() == 0L) {
+                              String lastErr = getLastError();
+                              if (lastErr != null && !lastErr.isEmpty()) {
+                                  throw new RuntimeException("MLC chat_completion rejected request: " + lastErr);
+                              }
+                          }
+                      } catch (ClassCastException | UnsupportedOperationException ignored) {
+                      }
+                  }
+              }
+
+              public String getLastError() {
+                  if (getLastErrorFunc == null) getLastErrorFunc = tryGetFunc("get_last_error");
+                  if (getLastErrorFunc == null) return "";
+                  try {
+                      TVMValue val = getLastErrorFunc.invoke();
+                      return val != null ? val.asString() : "";
+                  } catch (Throwable ignored) {
+                      return "";
+                  }
               }
 
               public void abort(String requestId) {
-                  abortFunc.pushArg(requestId).invoke();
+                  resolvePostInitFunctions();
+                  if (abortFunc != null) {
+                      abortFunc.pushArg(requestId).invoke();
+                  }
               }
 
               public void runBackgroundLoop() {
+                  resolvePostInitFunctions();
+                  if (runBackgroundLoopFunc == null) {
+                      throw new RuntimeException("TVM JSONFFIEngine has no 'run_background_loop' function. Available: " + probeAvailableFunctions());
+                  }
                   runBackgroundLoopFunc.invoke();
               }
 
               public void runBackgroundStreamBackLoop() {
+                  resolvePostInitFunctions();
+                  if (runBackgroundStreamBackLoopFunc == null) {
+                      throw new RuntimeException("TVM JSONFFIEngine has no 'run_background_stream_back_loop' function. Available: " + probeAvailableFunctions());
+                  }
                   runBackgroundStreamBackLoopFunc.invoke();
               }
 
               public void exitBackgroundLoop() {
-                  exitBackgroundLoopFunc.invoke();
+                  resolvePostInitFunctions();
+                  if (exitBackgroundLoopFunc != null) {
+                      exitBackgroundLoopFunc.invoke();
+                  }
               }
           }
           JAVA_EOF

@@ -147,10 +147,11 @@ class MlcNativeEngineBridge(private val context: Context) {
         val engine = try {
             ensureReloaded(modelDir, config, status)
         } catch (t: Throwable) {
-            val formatted = if (t is MlcUserFacingException) {
-                t.message.orEmpty()
-            } else {
-                "MLC TVM engine reload failed: ${formatThrowable("reload", t)}"
+            val formatted = when {
+                t is MlcUserFacingException -> t.message.orEmpty()
+                t is IOException && t.message?.startsWith("[") == true ->
+                    "MLC TVM engine error: ${t.message}"
+                else -> "MLC TVM engine reload failed: ${formatThrowable("reload", t)}"
             }
             Log.e(TAG, formatted, t)
             close(IOException(formatted, unwrapThrowable(t)))
