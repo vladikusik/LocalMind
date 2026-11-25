@@ -370,4 +370,7 @@
     <string name="hub_mlc_apk_required_badge">Нужен MLC APK</string>
     <string name="hub_mlc_runtime_notice">В этой сборке APK ещё нет скомпилированного движка TVM mlc4j. Чтобы запускать локальные модели на GPU/NPU прямо сейчас, перейдите к LiteRT-LM (.litertlm) или обновите APK через GitHub Actions.</string>
     <string name="hub_switch_to_litert_action">Перейти к LiteRT-LM (GPU/NPU)</string>
+    <string name="mlc_model_lib_not_bundled_error">Для модели «%1$s» в этом APK нет скомпилированного TVM GPU-ядра.\n\nСкомпилированные MLC GPU-модели, готовые к запуску прямо сейчас:\n%2$s\n\nСкачайте одну из этих моделей в Хабе моделей (метка «GPU-ядро в APK») или используйте LiteRT-LM (.litertlm) / GGUF.</string>
+    <string name="hub_mlc_kernel_ready_badge">GPU-ядро в APK</string>
+    <string name="hub_mlc_kernel_missing_badge">Нет ядра в APK</string>
 </resources>

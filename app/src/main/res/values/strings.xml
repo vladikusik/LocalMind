@@ -370,4 +370,7 @@
     <string name="hub_mlc_apk_required_badge">Needs MLC APK</string>
     <string name="hub_mlc_runtime_notice">This APK build does not bundle the compiled TVM mlc4j native library yet. To run on-device GPU/NPU models immediately without waiting for a new GitHub Actions build, use LiteRT-LM (.litertlm).</string>
     <string name="hub_switch_to_litert_action">Switch to LiteRT-LM (GPU/NPU)</string>
+    <string name="mlc_model_lib_not_bundled_error">Model \'%1$s\' does not have a precompiled TVM GPU kernel in this APK.\n\nCompiled MLC GPU models ready to run right now:\n%2$s\n\nDownload one of the models above in Model Hub (marked “GPU Kernel Ready”), or use LiteRT-LM (.litertlm) / GGUF.</string>
+    <string name="hub_mlc_kernel_ready_badge">GPU Kernel Ready</string>
+    <string name="hub_mlc_kernel_missing_badge">No APK Kernel</string>
 </resources>

@@ -42,7 +42,7 @@ jobs:
             app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
             app/libs/mlc4j-runtime.jar
             app/src/main/assets/mlc-app-config.json
-          key: mlc4j-prebuilt-apk-v4
+          key: mlc4j-prebuilt-apk-v5
 
       - name: Extract official prebuilt MLC-LLM TVM native runtime (mlc4j)
         id: build-mlc
@@ -69,6 +69,8 @@ jobs:
 
           echo "::group::Extract libtvm4j_runtime_packed.so and mlc-app-config.json"
           unzip -q "$MLC_WORK/mlc-chat.apk" -d "$MLC_WORK/apk"
+          echo "Native arm64-v8a libraries inside mlc-chat.apk:"
+          ls -lh "$MLC_WORK/apk/lib/arm64-v8a/" || true
           SO_PATH=$(find "$MLC_WORK/apk/lib/arm64-v8a" -name "libtvm4j_runtime_packed.so" | head -n 1 || true)
           if [ -z "$SO_PATH" ] || [ ! -s "$SO_PATH" ]; then
             echo "ERROR: libtvm4j_runtime_packed.so not found inside mlc-chat.apk!"
@@ -78,8 +80,10 @@ jobs:
 
           mkdir -p app/src/main/jniLibs/arm64-v8a app/libs app/src/main/assets
           cp "$SO_PATH" app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
+          echo "Dynamic dependencies (NEEDED) of libtvm4j_runtime_packed.so:"
+          readelf -d app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep NEEDED || true
           echo "Sample JNI/FFI symbols in libtvm4j_runtime_packed.so:"
-          strings app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep -E "CreateJSONFFIEngine|Java_org_apache_tvm" | head -n 15 || true
+          strings app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep -E "CreateJSONFFIEngine|Java_org_apache_tvm" | head -n 20 || true
 
           APP_CFG=$(find "$MLC_WORK/apk/assets" -name "mlc-app-config.json" | head -n 1 || true)
           if [ -n "$APP_CFG" ] && [ -s "$APP_CFG" ]; then
@@ -100,7 +104,7 @@ jobs:
             [ -f "$dex" ] || continue
             base=$(basename "$dex" .dex)
             "$D2J_BIN" -f -o "$MLC_WORK/${base}.jar" "$dex"
-            unzip -qo "$MLC_WORK/${base}.jar" "org/apache/tvm/*" "ai/mlc/mlcllm/JSONFFIEngine*" -d "$MLC_WORK/filtered" 2>/dev/null || true
+            unzip -qo "$MLC_WORK/${base}.jar" "org/apache/tvm/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
           done
 
           if [ ! -f "$MLC_WORK/filtered/org/apache/tvm/Function.class" ] || [ ! -f "$MLC_WORK/filtered/org/apache/tvm/LibInfo.class" ]; then
@@ -109,15 +113,15 @@ jobs:
             exit 1
           fi
 
-          # Include org.slf4j if org.apache.tvm.Base references it
-          if [ -f "$MLC_WORK/filtered/org/apache/tvm/Base.class" ] && javap -v "$MLC_WORK/filtered/org/apache/tvm/Base.class" | grep -q "org/slf4j/"; then
-            echo "org.apache.tvm.Base references org.slf4j — extracting org/slf4j classes..."
+          # Include org.slf4j if ANY extracted org.apache.tvm class references it
+          if find "$MLC_WORK/filtered/org/apache/tvm" -name "*.class" -exec javap -v {} + 2>/dev/null | grep -q "org/slf4j/"; then
+            echo "org.apache.tvm classes reference org.slf4j — bundling org/slf4j..."
             for jar_file in "$MLC_WORK"/classes*.jar; do
               [ -f "$jar_file" ] || continue
               unzip -qo "$jar_file" "org/slf4j/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
             done
             if [ ! -f "$MLC_WORK/filtered/org/slf4j/LoggerFactory.class" ]; then
-              echo "Fetching slf4j-api + slf4j-nop fallback classes..."
+              echo "Fetching slf4j-api + slf4j-nop classes..."
               curl -fSL -o "$MLC_WORK/slf4j-api.jar" "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar"
               curl -fSL -o "$MLC_WORK/slf4j-nop.jar" "https://repo1.maven.org/maven2/org/slf4j/slf4j-nop/1.7.36/slf4j-nop-1.7.36.jar"
               unzip -qo "$MLC_WORK/slf4j-api.jar" "org/slf4j/*" -d "$MLC_WORK/filtered"
@@ -125,19 +129,9 @@ jobs:
             fi
           fi
 
-          # Release mlc-chat.apk keeps org.apache.tvm.* for JNI but R8-minifies pure-Java ai.mlc.mlcllm.JSONFFIEngine.
-          # If JSONFFIEngine.class is not present un-obfuscated, compile official JSONFFIEngine.java against extracted org.apache.tvm!
-          if [ ! -f "$MLC_WORK/filtered/ai/mlc/mlcllm/JSONFFIEngine.class" ]; then
-            echo "Compiling ai.mlc.mlcllm.JSONFFIEngine against extracted org.apache.tvm..."
-            ANDROID_JAR="$ANDROID_HOME/platforms/android-36.1/android.jar"
-            curl -fSL --retry 3 \
-              -o "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java" \
-              "https://raw.githubusercontent.com/mlc-ai/mlc-llm/main/android/mlc4j/src/main/java/ai/mlc/mlcllm/JSONFFIEngine.java" || true
-
-            if [ ! -s "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java" ] || \
-               ! javac --release 11 -cp "$MLC_WORK/filtered:$ANDROID_JAR" -d "$MLC_WORK/filtered" "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java"; then
-              echo "Compiling self-contained fallback JSONFFIEngine.java..."
-              cat << 'JAVA_EOF' > "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java"
+          echo "Compiling resilient ai.mlc.mlcllm.JSONFFIEngine against extracted org.apache.tvm..."
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-36.1/android.jar"
+          cat << 'JAVA_EOF' > "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java"
           package ai.mlc.mlcllm;
 
           import org.apache.tvm.Function;
@@ -163,21 +157,38 @@ jobs:
               public JSONFFIEngine() {
                   Function createFunc = Function.getFunction("mlc.json_ffi.CreateJSONFFIEngine");
                   if (createFunc == null) {
-                      throw new RuntimeException("TVM function mlc.json_ffi.CreateJSONFFIEngine not found in libtvm4j_runtime_packed.so");
+                      throw new RuntimeException("TVM function 'mlc.json_ffi.CreateJSONFFIEngine' not registered in libtvm4j_runtime_packed.so");
                   }
-                  this.jsonFFIEngine = createFunc.invoke().asModule();
-                  this.initBackgroundEngineFunc = jsonFFIEngine.getFunction("init_background_engine");
-                  this.reloadFunc = jsonFFIEngine.getFunction("reload");
-                  this.unloadFunc = jsonFFIEngine.getFunction("unload");
-                  this.resetFunc = jsonFFIEngine.getFunction("reset");
-                  this.chatCompletionFunc = jsonFFIEngine.getFunction("chat_completion");
-                  this.abortFunc = jsonFFIEngine.getFunction("abort");
-                  this.runBackgroundLoopFunc = jsonFFIEngine.getFunction("run_background_loop");
-                  this.runBackgroundStreamBackLoopFunc = jsonFFIEngine.getFunction("run_background_stream_back_loop");
-                  this.exitBackgroundLoopFunc = jsonFFIEngine.getFunction("exit_background_loop");
+                  TVMValue modVal = createFunc.invoke();
+                  if (modVal == null) {
+                      throw new RuntimeException("mlc.json_ffi.CreateJSONFFIEngine returned null");
+                  }
+                  this.jsonFFIEngine = modVal.asModule();
+                  this.initBackgroundEngineFunc = requireFunc(jsonFFIEngine, "init_background_engine");
+                  this.reloadFunc = requireFunc(jsonFFIEngine, "reload");
+                  this.unloadFunc = requireFunc(jsonFFIEngine, "unload");
+                  this.resetFunc = requireFunc(jsonFFIEngine, "reset");
+                  this.chatCompletionFunc = requireFunc(jsonFFIEngine, "chat_completion");
+                  this.abortFunc = requireFunc(jsonFFIEngine, "abort");
+                  this.runBackgroundLoopFunc = requireFunc(jsonFFIEngine, "run_background_loop");
+                  this.runBackgroundStreamBackLoopFunc = requireFunc(jsonFFIEngine, "run_background_stream_back_loop");
+                  this.exitBackgroundLoopFunc = requireFunc(jsonFFIEngine, "exit_background_loop");
+              }
+
+              private static Function requireFunc(Module mod, String name) {
+                  Function fn = mod.getFunction(name);
+                  if (fn == null) {
+                      throw new RuntimeException("TVM JSONFFIEngine missing function '" + name + "'");
+                  }
+                  return fn;
               }
 
               public void initBackgroundEngine(KotlinFunction requestStreamCallback) {
+                  // Default to kDLOpenCL = 4, deviceId = 0
+                  initBackgroundEngine(4, 0, requestStreamCallback);
+              }
+
+              public void initBackgroundEngine(int deviceType, int deviceId, KotlinFunction requestStreamCallback) {
                   Function callback = Function.convertFunc(new Function.Callback() {
                       @Override
                       public Object invoke(TVMValue... args) {
@@ -187,12 +198,15 @@ jobs:
                           return null;
                       }
                   });
-                  // kDLOpenCL = 4, deviceId = 0
-                  initBackgroundEngineFunc.pushArg(4).pushArg(0).pushArg(callback).invoke();
+                  initBackgroundEngineFunc.pushArg(deviceType).pushArg(deviceId).pushArg(callback).invoke();
               }
 
               public void reload(String engineConfigJSON) {
                   reloadFunc.pushArg(engineConfigJSON).invoke();
+              }
+
+              public void reload(String modelPath, String modelLib) {
+                  reloadFunc.pushArg(modelPath).pushArg(modelLib).invoke();
               }
 
               public void unload() {
@@ -224,12 +238,10 @@ jobs:
               }
           }
           JAVA_EOF
-              javac --release 11 -cp "$MLC_WORK/filtered:$ANDROID_JAR" -d "$MLC_WORK/filtered" "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java"
-            fi
-          fi
+          javac --release 11 -cp "$MLC_WORK/filtered:$ANDROID_JAR" -d "$MLC_WORK/filtered" "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java"
 
           jar cf app/libs/mlc4j-runtime.jar -C "$MLC_WORK/filtered" .
-          javap -cp app/libs/mlc4j-runtime.jar ai.mlc.mlcllm.JSONFFIEngine
+          javap -p -cp app/libs/mlc4j-runtime.jar ai.mlc.mlcllm.JSONFFIEngine
           ls -lh app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/mlc4j-runtime.jar
           echo "::endgroup::"
 

@@ -645,6 +645,7 @@ fun ModelHubScreen(
                                 downloadedIds = downloadedModels.map { it.id }.toSet(),
                                 activeDownloads = hubState.activeDownloads,
                                 mlcNativeReady = hardwareInfo.mlcNativeReady,
+                                mlcBundledRepoIds = hardwareInfo.mlcBundledRepoIds,
                                 onToggle = { onToggleRepo(repo.repoId) },
                                 onDownloadFile = onStartDownload,
                                 onCancelDownload = onCancelDownload
@@ -843,11 +844,19 @@ private fun HfRepositoryCard(
     downloadedIds: Set<String>,
     activeDownloads: Map<String, ActiveDownloadState>,
     mlcNativeReady: Boolean,
+    mlcBundledRepoIds: Set<String>,
     onToggle: () -> Unit,
     onDownloadFile: (HfModelFile) -> Unit,
     onCancelDownload: (String) -> Unit
 ) {
     val studioColors = LocalStudioColors.current
+    val isMlcRepo = com.example.data.mlc.MlcModelCatalog.isMlcRepo(repo.repoId)
+    val hasCompiledMlcKernel = isMlcRepo && mlcNativeReady && (
+        mlcBundledRepoIds.contains(repo.repoId.lowercase()) ||
+            repo.tags.contains("prebuilt-gpu")
+        )
+    val isMissingMlcKernel = isMlcRepo && mlcNativeReady &&
+        mlcBundledRepoIds.isNotEmpty() && !hasCompiledMlcKernel
     LiquidGlassCard(
         shape = RoundedCornerShape(20.dp),
         modifier = Modifier.fillMaxWidth()
@@ -888,11 +897,41 @@ private fun HfRepositoryCard(
                             )
                         }
                     }
-                    Text(
-                        text = "${formatCount(repo.downloads)} downloads · ♥ ${repo.likes}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "${formatCount(repo.downloads)} downloads · ♥ ${repo.likes}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (hasCompiledMlcKernel) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = studioColors.statusOnline.copy(alpha = 0.16f)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.hub_mlc_kernel_ready_badge),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = studioColors.statusOnline,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else if (isMissingMlcKernel) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = studioColors.statusWarning.copy(alpha = 0.16f)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.hub_mlc_kernel_missing_badge),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = studioColors.statusWarning,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
                 }
 
                 Icon(
@@ -949,19 +988,21 @@ private fun HfRepositoryCard(
                                 val isDownloaded = downloadedIds.contains(fileKey)
                                 val activeDl = activeDownloads[fileKey]
                                 val isMlcUnavailable = file.format.equals("mlc", ignoreCase = true) && !mlcNativeReady
+                                val isMlcNoKernel = file.format.equals("mlc", ignoreCase = true) && isMissingMlcKernel
                                 val badgeLabel = when (file.format.lowercase()) {
                                     "mnn", "dlc", "qnn", "zip" -> stringResource(R.string.hub_badge_local_dream)
                                     "safetensors", "ckpt" -> stringResource(R.string.hub_badge_diffusion)
-                                    "mlc" -> if (isMlcUnavailable) {
-                                        stringResource(R.string.hub_mlc_apk_required_badge)
-                                    } else {
-                                        stringResource(R.string.hub_badge_mlc_llm)
+                                    "mlc" -> when {
+                                        isMlcUnavailable -> stringResource(R.string.hub_mlc_apk_required_badge)
+                                        isMlcNoKernel -> stringResource(R.string.hub_mlc_kernel_missing_badge)
+                                        hasCompiledMlcKernel -> stringResource(R.string.hub_mlc_kernel_ready_badge)
+                                        else -> stringResource(R.string.hub_badge_mlc_llm)
                                     }
                                     "gguf" -> stringResource(R.string.hub_badge_llama_cpp)
                                     "litertlm" -> stringResource(R.string.hub_badge_litert_lm)
                                     else -> stringResource(R.string.hub_badge_mediapipe)
                                 }
-                                val badgeColor = if (isMlcUnavailable) {
+                                val badgeColor = if (isMlcUnavailable || isMlcNoKernel) {
                                     studioColors.statusWarning
                                 } else {
                                     studioColors.statusOnline

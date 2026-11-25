@@ -18,6 +18,7 @@ data class HardwareAcceleratorInfo(
     val ggufVulkanBundled: Boolean,
     val mlcNativeReady: Boolean,
     val mlcGpuBackend: String,
+    val mlcBundledRepoIds: Set<String> = emptySet(),
     val gpuFamily: String,
     val recommendedHybridLayers: Int,
     val hasNnapi: Boolean,
@@ -42,7 +43,9 @@ object HardwareAcceleratorInspector {
         // Configure ADSP_LIBRARY_PATH and inspect bundled QNN HTP / LiteRT Dispatch libs immediately
         val qnnStatus = QnnRuntimeConfigurator.configureAndInspect(context)
         val vulkanStatus = VulkanGpuConfigurator.configureAndInspect(context, enableVulkan = true)
-        val mlcStatus = com.example.data.mlc.MlcNativeEngineBridge(context).inspectStatus()
+        val mlcBridge = com.example.data.mlc.MlcNativeEngineBridge(context)
+        val mlcStatus = mlcBridge.inspectStatus()
+        val mlcBundledRepos = mlcBridge.getBundledRepoIds().map { it.lowercase() }.toSet()
 
         val socManufacturer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Build.SOC_MANUFACTURER.orEmpty().trim()
@@ -182,6 +185,7 @@ object HardwareAcceleratorInspector {
             ggufVulkanBundled = vulkanStatus.hasBundledVulkanBackend,
             mlcNativeReady = mlcStatus.isNativeMlcReady,
             mlcGpuBackend = mlcStatus.activeGpuBackend,
+            mlcBundledRepoIds = mlcBundledRepos,
             gpuFamily = vulkanStatus.gpuFamily,
             recommendedHybridLayers = vulkanStatus.recommendedHybridLayers,
             hasNnapi = hasNnapi,
