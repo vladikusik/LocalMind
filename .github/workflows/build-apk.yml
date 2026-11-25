@@ -42,7 +42,7 @@ jobs:
             app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
             app/libs/mlc4j-runtime.jar
             app/src/main/assets/mlc-app-config.json
-          key: mlc4j-prebuilt-apk-v8
+          key: mlc4j-prebuilt-apk-v9
 
       - name: Extract official prebuilt MLC-LLM TVM native runtime (mlc4j)
         id: build-mlc
@@ -82,8 +82,6 @@ jobs:
           cp "$SO_PATH" app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
           echo "Dynamic dependencies (NEEDED) of libtvm4j_runtime_packed.so:"
           readelf -d app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep NEEDED || true
-          echo "Sample JNI/FFI symbols in libtvm4j_runtime_packed.so:"
-          strings app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep -E "CreateJSONFFIEngine|init_background_engine|run_background_loop|chat_completion|Java_org_apache_tvm" | head -n 30 || true
 
           APP_CFG=$(find "$MLC_WORK/apk/assets" -name "mlc-app-config.json" | head -n 1 || true)
           if [ -n "$APP_CFG" ] && [ -s "$APP_CFG" ]; then
@@ -93,7 +91,7 @@ jobs:
           fi
           echo "::endgroup::"
 
-          echo "::group::Extract ABI-matched org.apache.tvm classes and build ai.mlc.mlcllm.JSONFFIEngine"
+          echo "::group::Extract official org.apache.tvm and ai.mlc.mlcllm classes from mlc-chat.apk"
           D2J_URL="https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip"
           curl -fSL --retry 3 -o "$MLC_WORK/dex2jar.zip" "$D2J_URL"
           unzip -q "$MLC_WORK/dex2jar.zip" -d "$MLC_WORK/dex2jar"
@@ -105,6 +103,7 @@ jobs:
             base=$(basename "$dex" .dex)
             "$D2J_BIN" -f -o "$MLC_WORK/${base}.jar" "$dex"
             unzip -qo "$MLC_WORK/${base}.jar" "org/apache/tvm/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
+            unzip -qo "$MLC_WORK/${base}.jar" "ai/mlc/mlcllm/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
           done
 
           if [ ! -f "$MLC_WORK/filtered/org/apache/tvm/Function.class" ] || [ ! -f "$MLC_WORK/filtered/org/apache/tvm/LibInfo.class" ]; then
@@ -113,9 +112,15 @@ jobs:
             exit 1
           fi
 
-          # Include org.slf4j if ANY extracted org.apache.tvm class references it
-          if find "$MLC_WORK/filtered/org/apache/tvm" -name "*.class" -exec javap -v {} + 2>/dev/null | grep -q "org/slf4j/"; then
-            echo "org.apache.tvm classes reference org.slf4j — bundling org/slf4j..."
+          if [ ! -f "$MLC_WORK/filtered/ai/mlc/mlcllm/ChatModule.class" ] && [ ! -f "$MLC_WORK/filtered/ai/mlc/mlcllm/JSONFFIEngine.class" ]; then
+            echo "ERROR: Neither ai.mlc.mlcllm.ChatModule nor ai.mlc.mlcllm.JSONFFIEngine found in mlc-chat.apk!"
+            find "$MLC_WORK/filtered" -maxdepth 4 || true
+            exit 1
+          fi
+
+          # Include org.slf4j if ANY extracted TVM/MLC class references it
+          if find "$MLC_WORK/filtered" -name "*.class" -exec javap -v {} + 2>/dev/null | grep -q "org/slf4j/"; then
+            echo "Extracted TVM/MLC classes reference org.slf4j — bundling org/slf4j..."
             for jar_file in "$MLC_WORK"/classes*.jar; do
               [ -f "$jar_file" ] || continue
               unzip -qo "$jar_file" "org/slf4j/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
@@ -129,689 +134,60 @@ jobs:
             fi
           fi
 
-          echo "org.apache.tvm classes extracted from mlc-chat.apk:"
-          ls -la "$MLC_WORK/filtered/org/apache/tvm/" || true
-          javap -p -cp "$MLC_WORK/filtered" org.apache.tvm.Function || true
-          javap -p -cp "$MLC_WORK/filtered" org.apache.tvm.Device 2>/dev/null || true
+          echo "Extracted ai.mlc.mlcllm classes:"
+          ls -la "$MLC_WORK/filtered/ai/mlc/mlcllm/" || true
 
-          # Auto-inspect ALL mlc-chat.apk classes that invoke org/apache/tvm/Function or CreateJSONFFIEngine
-          python3 - "$MLC_WORK" << 'PY_INSPECT'
-          import glob, json, re, subprocess, sys, zipfile
+          # Inspect official ChatModule bytecode to detect exact reload(String, String) parameter order
+          FIRST_IS_LIB="true"
+          RELOAD_HINT=""
+          if [ -f "$MLC_WORK/filtered/ai/mlc/mlcllm/ChatModule.class" ]; then
+            javap -c -p -cp "$MLC_WORK/filtered" ai.mlc.mlcllm.ChatModule || true
+            FIRST_IS_LIB=$(python3 - "$MLC_WORK" << 'PY_CHATMOD'
+          import subprocess, sys
           work = sys.argv[1]
-          summary = {
-              "caller_classes": [],
-              "get_function_names": [],
-              "field_to_func": {},
-              "func_sigs": {},
-              "method_push_sigs": {},
-              "init_sig": "",
-              "reload_sig": "",
-              "tvm_push_overloads": []
-          }
-
-          # Inspect org.apache.tvm.Function pushArg overloads
+          first_is_lib = True
           try:
-              fn_api = subprocess.check_output(["javap", "-p", "-cp", f"{work}/filtered", "org.apache.tvm.Function"], text=True, errors="replace")
-              for ln in fn_api.splitlines():
-                  if "pushArg(" in ln or "call(" in ln:
-                      summary["tvm_push_overloads"].append(ln.strip())
+              out = subprocess.check_output(["javap", "-c", "-p", "-cp", f"{work}/filtered", "ai.mlc.mlcllm.ChatModule"], text=True, errors="replace")
+              lines = out.splitlines()
+              in_reload = False
+              last_param = 1
+              for ln in lines:
+                  if "reload(java.lang.String, java.lang.String)" in ln:
+                      in_reload = True
+                      continue
+                  if in_reload:
+                      if ln.strip() == "":
+                          break
+                      if "aload_1" in ln:
+                          last_param = 1
+                      elif "aload_2" in ln:
+                          last_param = 2
+                      if "org/apache/tvm/Function.pushArg:(Ljava/lang/String;)" in ln:
+                          first_is_lib = (last_param == 1)
+                          break
           except Exception as exc:
-              print(f"javap Function failed: {exc}")
+              print(f"# ChatModule inspect error: {exc}", file=sys.stderr)
+          print("true" if first_is_lib else "false")
+          PY_CHATMOD
+            )
+            RELOAD_HINT="ChatModule(firstArgIsModelLib=$FIRST_IS_LIB)"
+          fi
+          echo "Detected ChatModule reload parameter order: RELOAD_FIRST_ARG_IS_MODEL_LIB=$FIRST_IS_LIB"
 
-          def token_for_desc(desc, prev_ln):
-              if desc == "I":
-                  return "I"
-              if desc == "J":
-                  return "J"
-              if desc == "Ljava/lang/String;":
-                  if '"opencl"' in prev_ln or '"vulkan"' in prev_ln or '"cpu"' in prev_ln:
-                      return "DEV"
-                  return "S"
-              if desc == "Lorg/apache/tvm/Function;":
-                  return "F"
-              if desc in ("Lorg/apache/tvm/Device;", "Lorg/apache/tvm/TVMContext;"):
-                  return "D"
-              if "aconst_null" in prev_ln:
-                  return "N"
-              return desc
-
-          for jp in sorted(glob.glob(f"{work}/classes*.jar")):
-              try:
-                  with zipfile.ZipFile(jp) as zf:
-                      for name in zf.namelist():
-                          if not name.endswith(".class") or name.startswith("org/apache/tvm/"):
-                              continue
-                          data = zf.read(name)
-                          if (b"CreateJSONFFIEngine" in data or
-                              b"init_background_engine" in data or
-                              b"org/apache/tvm/Function" in data):
-                              cls = name[:-6].replace("/", ".")
-                              summary["caller_classes"].append(cls)
-                              print(f"Found mlc-chat.apk TVM caller class: {cls} in {jp}")
-                              try:
-                                  out = subprocess.check_output(["javap", "-c", "-p", "-cp", jp, cls], text=True, errors="replace")
-                              except Exception as exc:
-                                  print(f"javap failed for {cls}: {exc}")
-                                  continue
-                              print(out[:12000])
-                              lines = out.splitlines()
-
-                              # 1. Extract getFunction("...") names and field assignments (putfield)
-                              for idx, ln in enumerate(lines):
-                                  if "org/apache/tvm/Module.getFunction" in ln:
-                                      fn_name = ""
-                                      for back in range(1, 6):
-                                          if idx - back >= 0 and "// String " in lines[idx - back]:
-                                              fn_name = lines[idx - back].split("// String ", 1)[1].strip()
-                                              if fn_name not in summary["get_function_names"]:
-                                                  summary["get_function_names"].append(fn_name)
-                                              break
-                                      if fn_name:
-                                          for fwd in range(1, 6):
-                                              if idx + fwd < len(lines) and "putfield" in lines[idx + fwd] and "// Field " in lines[idx + fwd]:
-                                                  fld = lines[idx + fwd].split("// Field ", 1)[1].strip().split(":")[0]
-                                                  summary["field_to_func"][fld] = fn_name
-                                                  break
-
-                              # 2. Parse EVERY method via "Code:" anchor (works for public/final/private/ctors/throws)
-                              cur_method = ""
-                              cur_target_func = ""
-                              cur_args = []
-                              invoke_idx = 0
-                              for idx, ln in enumerate(lines):
-                                  if ln.strip() == "Code:":
-                                      if cur_method and cur_args:
-                                          sig = ",".join(cur_args)
-                                          summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
-                                      prev_hdr = lines[idx - 1].strip() if idx > 0 else "unknown"
-                                      cur_method = prev_hdr.rstrip(";")
-                                      cur_target_func = ""
-                                      cur_args = []
-                                      invoke_idx = 0
-                                      continue
-
-                                  if "getfield" in ln and "// Field " in ln:
-                                      fld = ln.split("// Field ", 1)[1].strip().split(":")[0]
-                                      if fld in summary["field_to_func"]:
-                                          cur_target_func = summary["field_to_func"][fld]
-                                  elif "org/apache/tvm/Module.getFunction" in ln:
-                                      for back in range(1, 5):
-                                          if idx - back >= 0 and "// String " in lines[idx - back]:
-                                              cur_target_func = lines[idx - back].split("// String ", 1)[1].strip()
-                                              break
-
-                                  m_push = re.search(r"org/apache/tvm/Function\.pushArg:\(([^)]+)\)", ln)
-                                  if m_push:
-                                      prev_ln = lines[idx - 1] if idx > 0 else ""
-                                      cur_args.append(token_for_desc(m_push.group(1), prev_ln))
-                                  elif "org/apache/tvm/Function.call:" in ln:
-                                      cur_args.append("CALL")
-                                      if cur_method:
-                                          sig = ",".join(cur_args)
-                                          summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
-                                          if cur_target_func:
-                                              summary["func_sigs"][cur_target_func] = sig
-                                          invoke_idx += 1
-                                          cur_args = []
-                                  elif "org/apache/tvm/Function.invoke:" in ln:
-                                      if cur_method and cur_args:
-                                          sig = ",".join(cur_args)
-                                          summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
-                                          if cur_target_func:
-                                              summary["func_sigs"][cur_target_func] = sig
-                                          invoke_idx += 1
-                                          cur_args = []
-                              if cur_method and cur_args:
-                                  sig = ",".join(cur_args)
-                                  summary["method_push_sigs"][f"{cls}.{cur_method}#{invoke_idx}"] = sig
-                                  if cur_target_func:
-                                      summary["func_sigs"][cur_target_func] = sig
-              except Exception as exc:
-                  print(f"Skipping jar {jp}: {exc}")
-
-          valid_tokens = {"I", "J", "S", "DEV", "F", "D", "N"}
-          if "init_background_engine" in summary["func_sigs"]:
-              cand = summary["func_sigs"]["init_background_engine"]
-              if all(p in valid_tokens for p in cand.split(",")):
-                  summary["init_sig"] = cand
-          if not summary["init_sig"]:
-              for m_name, sig in summary["method_push_sigs"].items():
-                  parts = sig.split(",")
-                  if "F" in parts and all(p in valid_tokens for p in parts):
-                      summary["init_sig"] = sig
-                      break
-          if "reload" in summary["func_sigs"]:
-              summary["reload_sig"] = summary["func_sigs"]["reload"]
-
-          with open(f"{work}/ffi_summary.json", "w") as f:
-              json.dump(summary, f, indent=2)
-          print("Extracted mlc-chat.apk FFI summary:")
-          print(json.dumps(summary, indent=2))
-          PY_INSPECT
-
-          DETECTED_INIT_SIG=$(python3 -c "import json; d=json.load(open('$MLC_WORK/ffi_summary.json')); print(d.get('init_sig',''))" || echo "")
-          DETECTED_FFI_INFO=$(python3 -c "import json; d=json.load(open('$MLC_WORK/ffi_summary.json')); print(('init=' + d.get('init_sig','') + '; fnSigs=' + str(d.get('func_sigs',{})) + '; funcs=' + ','.join(d.get('get_function_names',[])) + '; methodSigs=' + str(d.get('method_push_sigs',{})) + '; pushApi=' + '|'.join(d.get('tvm_push_overloads',[]))).replace('\"','').replace('\n',' ')[:750])" || echo "")
-          echo "Detected init sig: $DETECTED_INIT_SIG"
-          echo "Detected FFI info: $DETECTED_FFI_INFO"
-
-          echo "Compiling adaptive ai.mlc.mlcllm.JSONFFIEngine against extracted org.apache.tvm..."
           ANDROID_JAR="$ANDROID_HOME/platforms/android-36.1/android.jar"
-          cat << 'JAVA_EOF' > "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java"
+          cat << JAVA_META > "$MLC_WORK/src/ai/mlc/mlcllm/ChatModuleMeta.java"
           package ai.mlc.mlcllm;
 
-          import org.apache.tvm.Function;
-          import org.apache.tvm.Module;
-          import org.apache.tvm.TVMValue;
-
-          import java.lang.reflect.Constructor;
-          import java.lang.reflect.Method;
-          import java.util.ArrayList;
-          import java.util.LinkedHashSet;
-          import java.util.List;
-          import java.util.Set;
-          import java.util.regex.Matcher;
-          import java.util.regex.Pattern;
-
-          public class JSONFFIEngine {
-              public interface KotlinFunction {
-                  void invoke(String arg);
-              }
-
-              public static final String DETECTED_INIT_SIG = "__DETECTED_INIT_SIG__";
-              public static final String DETECTED_FFI_INFO = "__DETECTED_FFI_INFO__";
-
-              private static final Pattern REQUIRES_ARGS_PATTERN = Pattern.compile("requires\\s+(\\d+)\\s+arguments");
-
-              private final Module jsonFFIEngine;
-              private Function reloadFunc;
-              private Function unloadFunc;
-              private Function resetFunc;
-              private Function chatCompletionFunc;
-              private Function abortFunc;
-              private Function runBackgroundLoopFunc;
-              private Function runBackgroundStreamBackLoopFunc;
-              private Function exitBackgroundLoopFunc;
-              private Function getLastErrorFunc;
-              private boolean modelLoadedByInit = false;
-
-              public JSONFFIEngine() {
-                  Function createFunc = Function.getFunction("mlc.json_ffi.CreateJSONFFIEngine");
-                  if (createFunc == null) {
-                      throw new RuntimeException("TVM function 'mlc.json_ffi.CreateJSONFFIEngine' not registered in libtvm4j_runtime_packed.so");
-                  }
-                  TVMValue modVal = createFunc.invoke();
-                  if (modVal == null) {
-                      throw new RuntimeException("mlc.json_ffi.CreateJSONFFIEngine returned null");
-                  }
-                  this.jsonFFIEngine = modVal.asModule();
-                  if (tryGetFunc("init_background_engine") == null) {
-                      throw new RuntimeException("TVM JSONFFIEngine missing 'init_background_engine'. Found: " + probeAvailableFunctions() + " | " + DETECTED_FFI_INFO);
-                  }
-              }
-
-              private Function tryGetFunc(String name) {
-                  try {
-                      Function fn = jsonFFIEngine.getFunction(name);
-                      if (fn != null) return fn;
-                  } catch (Throwable ignored) {
-                  }
-                  try {
-                      Function fn = jsonFFIEngine.getFunction(name, true);
-                      if (fn != null) return fn;
-                  } catch (Throwable ignored) {
-                  }
-                  return null;
-              }
-
-              private Function tryGetAnyFunc(String... names) {
-                  for (String name : names) {
-                      Function fn = tryGetFunc(name);
-                      if (fn != null) return fn;
-                  }
-                  return null;
-              }
-
-              private String probeAvailableFunctions() {
-                  String[] candidates = new String[] {
-                      "init_background_engine",
-                      "reload",
-                      "reload_model",
-                      "reload_engine",
-                      "unload",
-                      "reset",
-                      "chat_completion",
-                      "abort",
-                      "get_last_error",
-                      "run_background_loop",
-                      "run_background_stream_back_loop",
-                      "exit_background_loop",
-                      "init_threaded_engine",
-                      "add_request",
-                      "abort_request",
-                      "debug_call_func_on_all_worker"
-                  };
-                  StringBuilder sb = new StringBuilder();
-                  for (String c : candidates) {
-                      if (tryGetFunc(c) != null) {
-                          if (sb.length() > 0) sb.append(", ");
-                          sb.append(c);
-                      }
-                  }
-                  return sb.length() > 0 ? sb.toString() : "(none of known names)";
-              }
-
-              private void resolvePostInitFunctions() {
-                  if (reloadFunc == null) reloadFunc = tryGetAnyFunc("reload", "reload_model", "reload_engine");
-                  if (unloadFunc == null) unloadFunc = tryGetFunc("unload");
-                  if (resetFunc == null) resetFunc = tryGetFunc("reset");
-                  if (chatCompletionFunc == null) chatCompletionFunc = tryGetFunc("chat_completion");
-                  if (abortFunc == null) abortFunc = tryGetFunc("abort");
-                  if (runBackgroundLoopFunc == null) runBackgroundLoopFunc = tryGetFunc("run_background_loop");
-                  if (runBackgroundStreamBackLoopFunc == null) runBackgroundStreamBackLoopFunc = tryGetFunc("run_background_stream_back_loop");
-                  if (exitBackgroundLoopFunc == null) exitBackgroundLoopFunc = tryGetFunc("exit_background_loop");
-                  if (getLastErrorFunc == null) getLastErrorFunc = tryGetFunc("get_last_error");
-              }
-
-              public boolean isModelLoadedByInit() {
-                  return modelLoadedByInit;
-              }
-
-              public void initBackgroundEngine(KotlinFunction requestStreamCallback) {
-                  initBackgroundEngine(4, 0, requestStreamCallback);
-              }
-
-              public void initBackgroundEngine(int deviceType, int deviceId, KotlinFunction requestStreamCallback) {
-                  initBackgroundEngineForModel(deviceType, deviceId, "", "", "", requestStreamCallback);
-              }
-
-              private static String deviceTypeName(int deviceType) {
-                  switch (deviceType) {
-                      case 4: return "opencl";
-                      case 7: return "vulkan";
-                      case 1: return "cpu";
-                      default: return "opencl";
-                  }
-              }
-
-              /**
-               * Initializes TVM JSONFFIEngine background engine using the exact ABI signature
-               * detected from mlc-chat.apk bytecode, with leak-free fallback across all known
-               * 3-arg and N-arg MLC-LLM C++ init_background_engine overloads.
-               *
-               * @return true if init_background_engine already loaded the model (no separate reload needed)
-               */
-              public boolean initBackgroundEngineForModel(
-                  int deviceType,
-                  int deviceId,
-                  String modelPath,
-                  String modelLib,
-                  String engineConfigJSON,
-                  KotlinFunction requestStreamCallback
-              ) {
-                  final Function callback = Function.convertFunc(new Function.Callback() {
-                      @Override
-                      public Object invoke(TVMValue... args) {
-                          if (args != null && args.length > 0 && args[0] != null) {
-                              requestStreamCallback.invoke(args[0].asString());
-                          }
-                          return null;
-                      }
-                  });
-
-                  boolean hasModelInfo = engineConfigJSON != null && !engineConfigJSON.isEmpty();
-                  Set<String> order = new LinkedHashSet<>();
-                  if (DETECTED_INIT_SIG != null && !DETECTED_INIT_SIG.isEmpty()) {
-                      order.add(DETECTED_INIT_SIG);
-                  }
-                  // Prioritize 3-arg signatures (mlc.json_ffi::init_background_engine requires 3 args in mlc-chat.apk):
-                  order.add("DEV,I,F");          // ("opencl", deviceId, callback)
-                  if (hasModelInfo) {
-                      order.add("S,I,F");        // (engineConfigJSON, deviceId, callback)
-                      order.add("S,S,F");        // (modelPath, modelLib, callback)
-                      order.add("I,S,F");        // (deviceType, engineConfigJSON, callback)
-                  }
-                  order.add("F,I,I");            // (callback, deviceType, deviceId)
-                  order.add("I,F,I");            // (deviceType, callback, deviceId)
-                  order.add("F,DEV,I");          // (callback, "opencl", deviceId)
-                  order.add("D,I,F");            // (Device, deviceId, callback)
-                  order.add("I,D,F");            // (deviceType, Device, callback)
-                  if (hasModelInfo) {
-                      order.add("D,S,F");        // (Device, engineConfigJSON, callback)
-                      order.add("S,D,F");        // (engineConfigJSON, Device, callback)
-                  }
-                  order.add("I,I,F");            // (deviceType, deviceId, callback)
-                  order.add("D,F,N");            // (Device, callback, null)
-                  order.add("I,F,N");            // (deviceType, callback, null)
-                  order.add("DEV,F,N");          // ("opencl", callback, null)
-                  if (hasModelInfo) {
-                      order.add("S,F,N");        // (engineConfigJSON, callback, null)
-                  }
-                  // Non-3-arg signatures (auto-skipped if TVM reports exact required arity != parts.length)
-                  order.add("D,F");
-                  order.add("F");
-                  order.add("I,F");
-                  if (hasModelInfo) {
-                      order.add("S,F");
-                      order.add("S,I,I,F");
-                      order.add("I,I,S,F");
-                      order.add("S,S,I,I,F");
-                      order.add("I,I,S,S,F");
-                  }
-                  order.add("I,I,F,N");
-
-                  int learnedRequiredArgs = -1;
-                  List<String> attemptErrors = new ArrayList<>();
-                  for (String sig : order) {
-                      String[] parts = sig.split(",");
-                      if (learnedRequiredArgs > 0 && parts.length != learnedRequiredArgs) {
-                          continue;
-                      }
-                      if (sig.contains("S") && !hasModelInfo) {
-                          continue;
-                      }
-                      Function fn = tryGetFunc("init_background_engine");
-                      if (fn == null) {
-                          throw new RuntimeException("TVM JSONFFIEngine missing init_background_engine");
-                      }
-                      try {
-                          boolean loadedModel = invokeInitWithSig(fn, parts, deviceType, deviceId, modelPath, modelLib, engineConfigJSON, callback);
-                          resolvePostInitFunctions();
-                          this.modelLoadedByInit = loadedModel && (reloadFunc == null);
-                          return this.modelLoadedByInit;
-                      } catch (Throwable t) {
-                          String msg = t.getMessage() != null ? t.getMessage() : t.toString();
-                          int nl = msg.indexOf('\n');
-                          String shortMsg = nl > 0 ? msg.substring(0, nl) : msg;
-                          attemptErrors.add(sig + " => " + shortMsg);
-
-                          Matcher m = REQUIRES_ARGS_PATTERN.matcher(msg);
-                          if (m.find()) {
-                              try {
-                                  learnedRequiredArgs = Integer.parseInt(m.group(1));
-                              } catch (NumberFormatException ignored) {
-                              }
-                          }
-
-                          // Only retry on TVM arg count / arg type mismatch; propagate real GPU/model errors
-                          boolean isArgMismatch =
-                              msg.contains("type_code_") ||
-                              msg.contains("expected Object") ||
-                              msg.contains("expected DLDevice") ||
-                              msg.contains("expected int") ||
-                              msg.contains("expected PackedFunc") ||
-                              msg.contains("args.size()") ||
-                              msg.contains("requires ") ||
-                              msg.contains("argument") ||
-                              msg.contains("TypeError") ||
-                              (t instanceof IllegalArgumentException);
-                          if (!isArgMismatch) {
-                              throw new RuntimeException("init_background_engine(" + sig + ") failed: " + msg + " | " + DETECTED_FFI_INFO, t);
-                          }
-                      }
-                  }
-
-                  throw new RuntimeException(
-                      "init_background_engine ABI mismatch | " + DETECTED_FFI_INFO +
-                      " | funcs=" + probeAvailableFunctions() +
-                      " | attempts: " + String.join(" ; ", attemptErrors)
-                  );
-              }
-
-              private Object[] resolveDeviceAndPushMethod(int deviceType, int deviceId) {
-                  String[] deviceClasses = new String[] {
-                      "org.apache.tvm.Device",
-                      "org.apache.tvm.TVMContext"
-                  };
-                  String factoryName = deviceTypeName(deviceType);
-                  Throwable lastErr = null;
-                  for (String clsName : deviceClasses) {
-                      try {
-                          Class<?> cls = Class.forName(clsName);
-                          Method push = Function.class.getMethod("pushArg", cls);
-                          Object dev = null;
-                          try {
-                              Constructor<?> ctor = cls.getDeclaredConstructor(int.class, int.class);
-                              ctor.setAccessible(true);
-                              dev = ctor.newInstance(deviceType, deviceId);
-                          } catch (Throwable ignored) {
-                          }
-                          if (dev == null) {
-                              try {
-                                  Method factory = cls.getMethod(factoryName, int.class);
-                                  dev = factory.invoke(null, deviceId);
-                              } catch (Throwable ignored) {
-                              }
-                          }
-                          if (dev == null) {
-                              try {
-                                  Method factory0 = cls.getMethod(factoryName);
-                                  dev = factory0.invoke(null);
-                              } catch (Throwable ignored) {
-                              }
-                          }
-                          if (dev != null) {
-                              return new Object[] { dev, push };
-                          }
-                      } catch (Throwable t) {
-                          lastErr = t;
-                      }
-                  }
-                  throw new IllegalArgumentException("Device unavailable: " + (lastErr != null ? lastErr.getMessage() : "no factory/ctor"));
-              }
-
-              private Method resolveNullPushMethod() {
-                  try {
-                      return Function.class.getMethod("pushArg", Object.class);
-                  } catch (Throwable ignored) {
-                  }
-                  try {
-                      return Function.class.getMethod("pushArg", TVMValue.class);
-                  } catch (Throwable ignored) {
-                  }
-                  throw new IllegalArgumentException("Function.pushArg(null) unavailable");
-              }
-
-              private boolean invokeInitWithSig(
-                  Function fn,
-                  String[] parts,
-                  int deviceType,
-                  int deviceId,
-                  String modelPath,
-                  String modelLib,
-                  String engineConfigJSON,
-                  Function callback
-              ) {
-                  // Pre-resolve reflective Device/null args BEFORE pushing anything so we NEVER leak TVM4J ThreadLocal args!
-                  Object[] preDevice = null;
-                  Method preNullPush = null;
-                  int strCount = 0;
-                  for (String p : parts) {
-                      if ("S".equals(p)) {
-                          strCount++;
-                      } else if ("D".equals(p) && preDevice == null) {
-                          preDevice = resolveDeviceAndPushMethod(deviceType, deviceId);
-                      } else if ("N".equals(p) && preNullPush == null) {
-                          preNullPush = resolveNullPushMethod();
-                      } else if (!("I".equals(p) || "J".equals(p) || "DEV".equals(p) || "F".equals(p) || "D".equals(p) || "N".equals(p))) {
-                          throw new IllegalArgumentException("Unsupported token: " + p);
-                      }
-                  }
-
-                  int pushed = 0;
-                  int intIdx = 0;
-                  int strIdx = 0;
-                  try {
-                      for (String p : parts) {
-                          switch (p) {
-                              case "I":
-                                  fn.pushArg(intIdx == 0 ? deviceType : deviceId);
-                                  intIdx++;
-                                  pushed++;
-                                  break;
-                              case "J":
-                                  fn.pushArg((long) (intIdx == 0 ? deviceType : deviceId));
-                                  intIdx++;
-                                  pushed++;
-                                  break;
-                              case "DEV":
-                                  fn.pushArg(deviceTypeName(deviceType));
-                                  pushed++;
-                                  break;
-                              case "D":
-                                  ((Method) preDevice[1]).invoke(fn, preDevice[0]);
-                                  pushed++;
-                                  break;
-                              case "F":
-                                  fn.pushArg(callback);
-                                  pushed++;
-                                  break;
-                              case "N":
-                                  preNullPush.invoke(fn, new Object[] { null });
-                                  pushed++;
-                                  break;
-                              case "S":
-                                  if (strCount == 1) {
-                                      fn.pushArg(engineConfigJSON);
-                                  } else {
-                                      fn.pushArg(strIdx == 0 ? modelPath : modelLib);
-                                  }
-                                  strIdx++;
-                                  pushed++;
-                                  break;
-                          }
-                      }
-                  } catch (Throwable pushErr) {
-                      // Flush any partially-pushed TVM4J ThreadLocal args before propagating
-                      if (pushed > 0) {
-                          try {
-                              fn.invoke();
-                          } catch (Throwable ignored) {
-                          }
-                      }
-                      if (pushErr instanceof RuntimeException) {
-                          throw (RuntimeException) pushErr;
-                      }
-                      throw new RuntimeException(pushErr);
-                  }
-                  fn.invoke();
-                  return strCount > 0;
-              }
-
-              public void reload(String engineConfigJSON) {
-                  resolvePostInitFunctions();
-                  if (reloadFunc == null) {
-                      if (modelLoadedByInit) {
-                          return;
-                      }
-                      throw new RuntimeException("TVM JSONFFIEngine has no 'reload' function. Available: " + probeAvailableFunctions() + " | " + DETECTED_FFI_INFO);
-                  }
-                  Function fn = tryGetAnyFunc("reload", "reload_model", "reload_engine");
-                  (fn != null ? fn : reloadFunc).pushArg(engineConfigJSON).invoke();
-              }
-
-              public void reload(String modelPath, String modelLib) {
-                  resolvePostInitFunctions();
-                  if (reloadFunc == null) {
-                      if (modelLoadedByInit) {
-                          return;
-                      }
-                      throw new RuntimeException("TVM JSONFFIEngine has no 'reload' function. Available: " + probeAvailableFunctions() + " | " + DETECTED_FFI_INFO);
-                  }
-                  Function fn = tryGetAnyFunc("reload", "reload_model", "reload_engine");
-                  (fn != null ? fn : reloadFunc).pushArg(modelPath).pushArg(modelLib).invoke();
-              }
-
-              public void unload() {
-                  resolvePostInitFunctions();
-                  if (unloadFunc != null) {
-                      unloadFunc.invoke();
-                  }
-              }
-
-              public void reset() {
-                  resolvePostInitFunctions();
-                  if (resetFunc != null) {
-                      resetFunc.invoke();
-                  }
-              }
-
-              public void chatCompletion(String requestJSON, String requestId) {
-                  resolvePostInitFunctions();
-                  if (chatCompletionFunc == null) {
-                      throw new RuntimeException("TVM JSONFFIEngine has no 'chat_completion' function. Available: " + probeAvailableFunctions());
-                  }
-                  Function fn = tryGetFunc("chat_completion");
-                  TVMValue ret = (fn != null ? fn : chatCompletionFunc).pushArg(requestJSON).pushArg(requestId).invoke();
-                  if (ret != null) {
-                      try {
-                          if (ret.asLong() == 0L) {
-                              String lastErr = getLastError();
-                              if (lastErr != null && !lastErr.isEmpty()) {
-                                  throw new RuntimeException("MLC chat_completion rejected request: " + lastErr);
-                              }
-                          }
-                      } catch (ClassCastException | UnsupportedOperationException ignored) {
-                      }
-                  }
-              }
-
-              public String getLastError() {
-                  if (getLastErrorFunc == null) getLastErrorFunc = tryGetFunc("get_last_error");
-                  if (getLastErrorFunc == null) return "";
-                  try {
-                      TVMValue val = getLastErrorFunc.invoke();
-                      return val != null ? val.asString() : "";
-                  } catch (Throwable ignored) {
-                      return "";
-                  }
-              }
-
-              public void abort(String requestId) {
-                  resolvePostInitFunctions();
-                  if (abortFunc != null) {
-                      Function fn = tryGetFunc("abort");
-                      (fn != null ? fn : abortFunc).pushArg(requestId).invoke();
-                  }
-              }
-
-              public void runBackgroundLoop() {
-                  resolvePostInitFunctions();
-                  if (runBackgroundLoopFunc == null) {
-                      throw new RuntimeException("TVM JSONFFIEngine has no 'run_background_loop' function. Available: " + probeAvailableFunctions());
-                  }
-                  runBackgroundLoopFunc.invoke();
-              }
-
-              public void runBackgroundStreamBackLoop() {
-                  resolvePostInitFunctions();
-                  if (runBackgroundStreamBackLoopFunc == null) {
-                      throw new RuntimeException("TVM JSONFFIEngine has no 'run_background_stream_back_loop' function. Available: " + probeAvailableFunctions());
-                  }
-                  runBackgroundStreamBackLoopFunc.invoke();
-              }
-
-              public void exitBackgroundLoop() {
-                  resolvePostInitFunctions();
-                  if (exitBackgroundLoopFunc != null) {
-                      exitBackgroundLoopFunc.invoke();
-                  }
-              }
+          public final class ChatModuleMeta {
+              public static final boolean RELOAD_FIRST_ARG_IS_MODEL_LIB = ${FIRST_IS_LIB};
+              public static final String RELOAD_HINT = "${RELOAD_HINT}";
           }
-          JAVA_EOF
+          JAVA_META
 
-          python3 - "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java" "$DETECTED_INIT_SIG" "$DETECTED_FFI_INFO" << 'PY_PATCH'
-          import sys
-          path, init_sig, ffi_info = sys.argv[1], sys.argv[2], sys.argv[3]
-          src = open(path).read()
-          src = src.replace("__DETECTED_INIT_SIG__", init_sig.replace("\\", "\\\\").replace("\"", "\\\""))
-          src = src.replace("__DETECTED_FFI_INFO__", ffi_info.replace("\\", "\\\\").replace("\"", "\\\""))
-          open(path, "w").write(src)
-          PY_PATCH
-
-          javac --release 11 -cp "$MLC_WORK/filtered:$ANDROID_JAR" -d "$MLC_WORK/filtered" "$MLC_WORK/src/ai/mlc/mlcllm/JSONFFIEngine.java"
+          javac --release 11 -cp "$MLC_WORK/filtered:$ANDROID_JAR" -d "$MLC_WORK/filtered" "$MLC_WORK/src/ai/mlc/mlcllm/ChatModuleMeta.java"
 
           jar cf app/libs/mlc4j-runtime.jar -C "$MLC_WORK/filtered" .
-          javap -p -cp app/libs/mlc4j-runtime.jar ai.mlc.mlcllm.JSONFFIEngine
+          jar tf app/libs/mlc4j-runtime.jar | grep -E "ai/mlc/mlcllm/|org/apache/tvm/" | head -n 40
           ls -lh app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/mlc4j-runtime.jar
           echo "::endgroup::"
 

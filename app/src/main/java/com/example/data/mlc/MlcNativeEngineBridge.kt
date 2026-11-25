@@ -39,20 +39,28 @@ data class MlcRuntimeStatus(
 }
 
 /**
- * Native MLC-LLM (`mlc4j` / Apache TVM `JSONFFIEngine`) runtime bridge for Android,
- * faithfully implementing `mlc-ai/mlc-llm`'s dual-thread background loop architecture:
+ * Native MLC-LLM (`mlc4j` / Apache TVM) runtime bridge for Android.
  *
- * - Background Engine Thread (`runBackgroundLoop`) drives TVM OpenCL/Vulkan GPU kernels
- *   with PagedKVCache & chunked prefill.
- * - Stream-Back Thread (`runBackgroundStreamBackLoop`) delivers OpenAI JSON-FFI token chunks
- *   and `usage.extra` prefill/decode metrics without stalling GPU decode.
- * - Resolves compiled `model_lib` symbols strictly from APK-bundled `assets/mlc-app-config.json`
- *   (extracted from official prebuilt `mlc-chat.apk` during CI build).
+ * Supports both official `mlc-chat.apk` runtime interfaces:
+ * 1. `ai.mlc.mlcllm.ChatModule` (classic TVM OpenCL GPU engine bundled in official `mlc-chat.apk`,
+ *    running all GPU calls on a single dedicated TVM thread with KV-cache reuse and UTF-8 safe
+ *    delta streaming).
+ * 2. `ai.mlc.mlcllm.JSONFFIEngine` (dual-thread background loop engine when present).
  *
+ * Resolves compiled `model_lib` symbols strictly from APK-bundled `assets/mlc-app-config.json`.
  * Google Play Policy Compliant: strictly loads only APK-bundled native libraries from
  * `nativeLibraryDir` (never downloads `.so`/`.jar`/`.dex` at runtime).
  */
 class MlcNativeEngineBridge(private val context: Context) {
+
+    @Volatile
+    private var chatModule: Any? = null
+    @Volatile
+    private var chatModuleModelDir: String? = null
+    @Volatile
+    private var chatModuleModelLib: String? = null
+    @Volatile
+    private var lastChatHistory: List<Pair<String, String>> = emptyList()
 
     @Volatile
     private var jsonFfiEngine: Any? = null
@@ -68,6 +76,14 @@ class MlcNativeEngineBridge(private val context: Context) {
     private var backgroundLoopError: Throwable? = null
     @Volatile
     private var cachedAppModels: List<MlcAppModelEntry>? = null
+
+    // Single dedicated thread for ChatModule so TVM OpenCL/Vulkan GPU contexts stay thread-affine
+    private val chatModuleExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "LocalMind-MLC-ChatModule").apply {
+            priority = Thread.NORM_PRIORITY + 1
+            isDaemon = true
+        }
+    }
 
     private val bgExecutor = Executors.newFixedThreadPool(2) { runnable ->
         Thread(runnable, "LocalMind-MLC-TVM").apply {
@@ -93,9 +109,14 @@ class MlcNativeEngineBridge(private val context: Context) {
                 it.contains("mlc_llm", ignoreCase = true)
         }
         val hasMlc4jClass = runCatching {
-            Class.forName("ai.mlc.mlcllm.JSONFFIEngine")
+            Class.forName("ai.mlc.mlcllm.ChatModule")
             true
-        }.getOrDefault(false)
+        }.getOrElse {
+            runCatching {
+                Class.forName("ai.mlc.mlcllm.JSONFFIEngine")
+                true
+            }.getOrDefault(false)
+        }
 
         val hasOpenCl = listOf(
             "/vendor/lib64/libOpenCL.so",
@@ -125,6 +146,314 @@ class MlcNativeEngineBridge(private val context: Context) {
     }
 
     fun streamChatCompletion(
+        modelDir: File,
+        displayName: String,
+        messages: List<ChatMessageDto>,
+        temperature: Float,
+        maxTokens: Int
+    ): Flow<StreamEvent> {
+        val chatModuleClass = runCatching { Class.forName("ai.mlc.mlcllm.ChatModule") }.getOrNull()
+        if (chatModuleClass != null) {
+            return streamViaChatModule(
+                chatModuleClass = chatModuleClass,
+                modelDir = modelDir,
+                displayName = displayName,
+                messages = messages,
+                maxTokens = maxTokens
+            )
+        }
+        return streamViaJsonFfiEngine(
+            modelDir = modelDir,
+            displayName = displayName,
+            messages = messages,
+            temperature = temperature,
+            maxTokens = maxTokens
+        )
+    }
+
+    private fun streamViaChatModule(
+        chatModuleClass: Class<*>,
+        modelDir: File,
+        displayName: String,
+        messages: List<ChatMessageDto>,
+        maxTokens: Int
+    ): Flow<StreamEvent> = callbackFlow {
+        val status = inspectStatus()
+        val config = MlcChatConfig.loadFromDir(modelDir)
+
+        if (!status.isNativeMlcReady) {
+            val quant = config?.quantization ?: "q4f16_1"
+            close(
+                IOException(
+                    context.getString(R.string.mlc_runtime_missing_error, displayName, quant)
+                )
+            )
+            return@callbackFlow
+        }
+
+        val cancelled = AtomicBoolean(false)
+        val future = chatModuleExecutor.submit {
+            try {
+                // 1. Validate downloaded MLC bundle integrity BEFORE touching native TVM runtime
+                validateModelBundle(modelDir, config)
+
+                // 2. Strictly resolve compiled model_lib symbol BEFORE initializing TVM
+                val modelLib = resolveCompiledModelLib(modelDir, config, status.bundledModelLibs)
+                val cleanLib = modelLib.removePrefix("system://")
+
+                // 3. Explicitly load libtvm4j_runtime_packed.so
+                try {
+                    System.loadLibrary("tvm4j_runtime_packed")
+                } catch (e: UnsatisfiedLinkError) {
+                    throw IOException(formatThrowable("loadLibrary", e), e)
+                }
+
+                // 4. Create or reuse ChatModule on this dedicated TVM GPU thread
+                var module = chatModule
+                if (module == null) {
+                    module = try {
+                        chatModuleClass.getDeclaredConstructor().newInstance()
+                    } catch (t: Throwable) {
+                        throw IOException(formatThrowable("createChatModule", t), unwrapThrowable(t))
+                    }
+                    chatModule = module
+                    activeDeviceLabel = if (status.hasOpenCl) "TVM OpenCL GPU" else "TVM GPU"
+                }
+
+                // 5. Reload model weights & compiled SystemLib if model changed
+                if (chatModuleModelDir != modelDir.absolutePath || chatModuleModelLib != cleanLib) {
+                    if (chatModuleModelDir != null) {
+                        runCatching { findMethod(chatModuleClass, "unload")?.invoke(module) }
+                    }
+                    reloadChatModuleResilient(chatModuleClass, module, cleanLib, modelDir.absolutePath)
+                    chatModuleModelDir = modelDir.absolutePath
+                    chatModuleModelLib = cleanLib
+                    lastChatHistory = emptyList()
+                }
+
+                if (cancelled.get()) return@submit
+
+                val backendName = activeDeviceLabel ?: status.activeGpuBackend
+                val modelLabel = "$displayName (MLC · $backendName)"
+
+                // 6. Synchronize conversation KV cache
+                val normalizedHistory = messages.map { it.role.trim().lowercase() to it.content }
+                val canReuseKv = lastChatHistory.isNotEmpty() &&
+                    normalizedHistory.size == lastChatHistory.size + 1 &&
+                    normalizedHistory.dropLast(1) == lastChatHistory &&
+                    normalizedHistory.last().first == "user"
+
+                val promptToPrefill = if (canReuseKv) {
+                    normalizedHistory.last().second
+                } else {
+                    if (lastChatHistory.isNotEmpty()) {
+                        runCatching {
+                            findMethod(chatModuleClass, "resetChat", "reset_chat")?.invoke(module)
+                        }
+                        lastChatHistory = emptyList()
+                    }
+                    buildInitialChatModulePrompt(normalizedHistory)
+                }
+
+                val prefillMethod = findMethod(chatModuleClass, "prefill", String::class.java)
+                    ?: throw IOException("[ChatModule] Missing prefill(String) method")
+                val decodeMethod = findMethod(chatModuleClass, "decode")
+                    ?: throw IOException("[ChatModule] Missing decode() method")
+                val getMessageMethod = findMethod(chatModuleClass, "getMessage", "get_message")
+                    ?: throw IOException("[ChatModule] Missing getMessage() method")
+                val stoppedMethod = findMethod(chatModuleClass, "stopped")
+                    ?: throw IOException("[ChatModule] Missing stopped() method")
+                val statsMethod = findMethod(chatModuleClass, "runtimeStatsText", "runtime_stats_text")
+
+                val requestStartNs = System.nanoTime()
+                var firstTokenNs = 0L
+
+                // 7. Prefill prompt on TVM GPU
+                try {
+                    prefillMethod.invoke(module, promptToPrefill)
+                } catch (t: Throwable) {
+                    throw IOException(formatThrowable("prefill", t), unwrapThrowable(t))
+                }
+
+                val tokenCap = maxTokens.coerceIn(32, 4096)
+                var emittedText = ""
+                var decodeSteps = 0
+
+                // 8. Stream token-by-token decode loop with UTF-8 multi-byte guard
+                while (!cancelled.get() && decodeSteps < tokenCap) {
+                    val isStopped = (stoppedMethod.invoke(module) as? Boolean) == true
+                    if (isStopped) break
+
+                    decodeMethod.invoke(module)
+                    decodeSteps++
+
+                    val rawFull = (getMessageMethod.invoke(module) as? String).orEmpty()
+                    val safeFull = rawFull.trimEnd('\uFFFD')
+                    val delta = when {
+                        safeFull.length > emittedText.length && safeFull.startsWith(emittedText) ->
+                            safeFull.substring(emittedText.length)
+                        emittedText.isEmpty() && safeFull.isNotEmpty() ->
+                            safeFull
+                        else -> ""
+                    }
+                    if (delta.isNotEmpty()) {
+                        if (firstTokenNs == 0L) firstTokenNs = System.nanoTime()
+                        emittedText = safeFull
+                        trySend(StreamEvent.Chunk(contentDelta = delta, modelName = modelLabel))
+                    }
+                }
+
+                if (cancelled.get()) {
+                    lastChatHistory = emptyList()
+                    return@submit
+                }
+
+                // Flush any trailing characters after stop
+                val finalFull = (getMessageMethod.invoke(module) as? String).orEmpty()
+                if (finalFull.length > emittedText.length && finalFull.startsWith(emittedText)) {
+                    val tail = finalFull.substring(emittedText.length)
+                    if (tail.isNotEmpty()) {
+                        if (firstTokenNs == 0L) firstTokenNs = System.nanoTime()
+                        emittedText = finalFull
+                        trySend(StreamEvent.Chunk(contentDelta = tail, modelName = modelLabel))
+                    }
+                }
+
+                lastChatHistory = normalizedHistory + ("assistant" to emittedText)
+
+                val statsText = runCatching { statsMethod?.invoke(module) as? String }.getOrNull().orEmpty()
+                val parsedDecodeTps = parseStatsRate(statsText, "decode")
+                    ?: computeDecodeTps(firstTokenNs, decodeSteps)
+                val parsedPrefillTps = parseStatsRate(statsText, "prefill")
+                val ttftMs = if (firstTokenNs > 0L) {
+                    (firstTokenNs - requestStartNs) / 1_000_000L
+                } else 0L
+
+                trySend(
+                    StreamEvent.Completed(
+                        tokensPerSecond = parsedDecodeTps,
+                        modelName = modelLabel,
+                        ttftMs = ttftMs,
+                        prefillTokensPerSec = parsedPrefillTps,
+                        kvCacheReused = canReuseKv
+                    )
+                )
+                close()
+            } catch (t: Throwable) {
+                lastChatHistory = emptyList()
+                val formatted = when {
+                    t is MlcUserFacingException -> t.message.orEmpty()
+                    t is IOException && t.message?.startsWith("[") == true ->
+                        "MLC TVM engine error: ${t.message}"
+                    else -> "MLC TVM engine error: ${formatThrowable("chatModule", t)}"
+                }
+                Log.e(TAG, formatted, t)
+                close(IOException(formatted, unwrapThrowable(t)))
+            }
+        }
+
+        awaitClose {
+            cancelled.set(true)
+            future.cancel(false)
+        }
+    }
+
+    private fun reloadChatModuleResilient(
+        chatModuleClass: Class<*>,
+        module: Any,
+        cleanLib: String,
+        modelPath: String
+    ) {
+        val reloadMethod = findMethod(chatModuleClass, "reload", String::class.java, String::class.java)
+            ?: throw IOException("[ChatModule] Missing reload(String, String) method")
+
+        val firstArgIsModelLib = runCatching {
+            val metaClass = Class.forName("ai.mlc.mlcllm.ChatModuleMeta")
+            metaClass.getField("RELOAD_FIRST_ARG_IS_MODEL_LIB").getBoolean(null)
+        }.getOrDefault(true)
+
+        val primaryFirst = if (firstArgIsModelLib) cleanLib else modelPath
+        val primarySecond = if (firstArgIsModelLib) modelPath else cleanLib
+
+        try {
+            reloadMethod.invoke(module, primaryFirst, primarySecond)
+            return
+        } catch (t: Throwable) {
+            val root = unwrapThrowable(t)
+            val msg = root.message.orEmpty()
+            // Retry with swapped argument order if SystemLib failed on a directory path
+            val looksLikeSwappedArgs = msg.contains("SystemLib", ignoreCase = true) ||
+                msg.contains(modelPath, ignoreCase = false) ||
+                msg.contains("not found", ignoreCase = true) ||
+                msg.contains("Cannot open", ignoreCase = true)
+            if (looksLikeSwappedArgs) {
+                val altFirst = if (firstArgIsModelLib) modelPath else cleanLib
+                val altSecond = if (firstArgIsModelLib) cleanLib else modelPath
+                try {
+                    reloadMethod.invoke(module, altFirst, altSecond)
+                    return
+                } catch (t2: Throwable) {
+                    // Also try underscore-normalized prefix if SystemLib expected trailing underscore
+                    val normalizedLib = cleanLib.replace('-', '_').trimEnd('_') + "_"
+                    if (normalizedLib != cleanLib) {
+                        try {
+                            val normFirst = if (firstArgIsModelLib) normalizedLib else modelPath
+                            val normSecond = if (firstArgIsModelLib) modelPath else normalizedLib
+                            reloadMethod.invoke(module, normFirst, normSecond)
+                            return
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    throw IOException(formatThrowable("ChatModule.reload(lib=$cleanLib)", root), root)
+                }
+            }
+            throw IOException(formatThrowable("ChatModule.reload(lib=$cleanLib)", root), root)
+        }
+    }
+
+    private fun buildInitialChatModulePrompt(history: List<Pair<String, String>>): String {
+        val nonBlank = history.filter { it.second.isNotBlank() }
+        if (nonBlank.isEmpty()) return ""
+        val systemText = nonBlank.filter { it.first == "system" }.joinToString("\n") { it.second.trim() }
+        val turns = nonBlank.filter { it.first != "system" }
+        if (turns.isEmpty()) return systemText
+        if (turns.size == 1) {
+            val userMsg = turns.first().second
+            return if (systemText.isNotBlank()) "$systemText\n\n$userMsg" else userMsg
+        }
+        val sb = StringBuilder()
+        if (systemText.isNotBlank()) {
+            sb.append(systemText).append("\n\n")
+        }
+        val prior = turns.dropLast(1).takeLast(6)
+        if (prior.isNotEmpty()) {
+            sb.append("Previous conversation:\n")
+            prior.forEach { (role, content) ->
+                val label = if (role == "assistant") "Assistant" else "User"
+                sb.append(label).append(": ").append(content.trim()).append("\n")
+            }
+            sb.append("\n")
+        }
+        sb.append(turns.last().second)
+        return sb.toString()
+    }
+
+    private fun parseStatsRate(statsText: String, key: String): Float? {
+        if (statsText.isBlank()) return null
+        val match = Regex("$key\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)", RegexOption.IGNORE_CASE).find(statsText)
+        return match?.groupValues?.getOrNull(1)?.toFloatOrNull()?.takeIf { it > 0f }
+    }
+
+    private fun findMethod(cls: Class<*>, name: String, vararg paramTypes: Class<*>): java.lang.reflect.Method? {
+        return runCatching { cls.getMethod(name, *paramTypes) }.getOrNull()
+    }
+
+    private fun findMethod(cls: Class<*>, primaryName: String, fallbackName: String): java.lang.reflect.Method? {
+        return runCatching { cls.getMethod(primaryName) }.getOrNull()
+            ?: runCatching { cls.getMethod(fallbackName) }.getOrNull()
+    }
+
+    private fun streamViaJsonFfiEngine(
         modelDir: File,
         displayName: String,
         messages: List<ChatMessageDto>,
@@ -768,6 +1097,12 @@ class MlcNativeEngineBridge(private val context: Context) {
     }
 
     fun resetConversation() {
+        chatModule?.let { module ->
+            chatModuleExecutor.execute {
+                runCatching { findMethod(module.javaClass, "resetChat", "reset_chat")?.invoke(module) }
+                lastChatHistory = emptyList()
+            }
+        }
         synchronized(lock) {
             val engine = jsonFfiEngine ?: return
             runCatching { engine.javaClass.getMethod("reset").invoke(engine) }
@@ -775,6 +1110,14 @@ class MlcNativeEngineBridge(private val context: Context) {
     }
 
     fun unload() {
+        chatModule?.let { module ->
+            chatModuleExecutor.execute {
+                runCatching { findMethod(module.javaClass, "unload")?.invoke(module) }
+                chatModuleModelDir = null
+                chatModuleModelLib = null
+                lastChatHistory = emptyList()
+            }
+        }
         synchronized(lock) {
             val engine = jsonFfiEngine ?: return
             runCatching { engine.javaClass.getMethod("unload").invoke(engine) }
