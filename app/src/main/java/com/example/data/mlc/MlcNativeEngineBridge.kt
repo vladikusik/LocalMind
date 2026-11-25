@@ -334,7 +334,35 @@ class MlcNativeEngineBridge(private val context: Context) {
                 backgroundLoopError = null
             }
 
+            // If switching models on a TVM engine that loaded the model directly in init (no separate reload),
+            // cleanly exit the previous engine instance so initBackgroundEngineForModel runs for the new model.
+            val existingEngine = jsonFfiEngine
+            if (existingEngine != null &&
+                (loadedModelDir != modelDir.absolutePath || loadedModelLib != modelLib)
+            ) {
+                val loadedByInitOnly = runCatching {
+                    (existingEngine.javaClass.getMethod("isModelLoadedByInit").invoke(existingEngine) as? Boolean) == true
+                }.getOrDefault(false)
+                if (loadedByInitOnly) {
+                    runCatching { existingEngine.javaClass.getMethod("exitBackgroundLoop").invoke(existingEngine) }
+                    runCatching { existingEngine.javaClass.getMethod("unload").invoke(existingEngine) }
+                    jsonFfiEngine = null
+                    loopsStarted = false
+                    loadedModelDir = null
+                    loadedModelLib = null
+                }
+            }
+
+            val cleanLib = modelLib.removePrefix("system://")
+            val systemLibUri = "system://$cleanLib"
+            val reloadPayload = JSONObject().apply {
+                put("model", modelDir.absolutePath)
+                put("model_lib", systemLibUri)
+                put("mode", "interactive")
+            }.toString()
+
             var engine = jsonFfiEngine
+            var modelAlreadyLoadedByInit = false
             if (engine == null) {
                 engine = try {
                     engineClass.getDeclaredConstructor().newInstance()
@@ -359,7 +387,16 @@ class MlcNativeEngineBridge(private val context: Context) {
                     null
                 }
 
-                initEngineWithDeviceFallback(engineClass, engine, callbackInterface, callbackProxy, status)
+                modelAlreadyLoadedByInit = initEngineWithDeviceFallback(
+                    engineClass = engineClass,
+                    engine = engine,
+                    callbackInterface = callbackInterface,
+                    callbackProxy = callbackProxy,
+                    status = status,
+                    modelPath = modelDir.absolutePath,
+                    modelLib = systemLibUri,
+                    engineConfigJson = reloadPayload
+                )
 
                 if (!loopsStarted) {
                     loopsStarted = true
@@ -394,7 +431,9 @@ class MlcNativeEngineBridge(private val context: Context) {
             }
 
             if (loadedModelDir != modelDir.absolutePath || loadedModelLib != modelLib) {
-                invokeReloadResilient(engineClass, engine, modelDir.absolutePath, modelLib)
+                if (!modelAlreadyLoadedByInit) {
+                    invokeReloadResilient(engineClass, engine, modelDir.absolutePath, modelLib)
+                }
                 loadedModelDir = modelDir.absolutePath
                 loadedModelLib = modelLib
             }
@@ -407,8 +446,23 @@ class MlcNativeEngineBridge(private val context: Context) {
         engine: Any,
         callbackInterface: Class<*>,
         callbackProxy: Any,
-        status: MlcRuntimeStatus
-    ) {
+        status: MlcRuntimeStatus,
+        modelPath: String,
+        modelLib: String,
+        engineConfigJson: String
+    ): Boolean {
+        val initForModel = runCatching {
+            engineClass.getMethod(
+                "initBackgroundEngineForModel",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                callbackInterface
+            )
+        }.getOrNull()
+
         val init3Arg = runCatching {
             engineClass.getMethod(
                 "initBackgroundEngine",
@@ -418,7 +472,7 @@ class MlcNativeEngineBridge(private val context: Context) {
             )
         }.getOrNull()
 
-        if (init3Arg != null) {
+        if (initForModel != null || init3Arg != null) {
             // TVM DLDeviceType: kDLOpenCL = 4, kDLVulkan = 7, kDLCPU = 1
             val candidates = buildList {
                 if (status.hasOpenCl) add(4 to "TVM OpenCL GPU")
@@ -430,9 +484,22 @@ class MlcNativeEngineBridge(private val context: Context) {
             var lastError: Throwable? = null
             for ((deviceType, label) in candidates) {
                 try {
-                    init3Arg.invoke(engine, deviceType, 0, callbackProxy)
+                    val loaded = if (initForModel != null) {
+                        (initForModel.invoke(
+                            engine,
+                            deviceType,
+                            0,
+                            modelPath,
+                            modelLib,
+                            engineConfigJson,
+                            callbackProxy
+                        ) as? Boolean) ?: false
+                    } else {
+                        init3Arg!!.invoke(engine, deviceType, 0, callbackProxy)
+                        false
+                    }
                     activeDeviceLabel = label
-                    return
+                    return loaded
                 } catch (t: Throwable) {
                     val root = unwrapThrowable(t)
                     Log.w(TAG, "initBackgroundEngine($label, type=$deviceType) failed: ${root.message}", root)
@@ -450,6 +517,7 @@ class MlcNativeEngineBridge(private val context: Context) {
             engineClass.getMethod("initBackgroundEngine", callbackInterface)
                 .invoke(engine, callbackProxy)
             activeDeviceLabel = status.activeGpuBackend
+            return false
         } catch (t: Throwable) {
             throw IOException(formatThrowable("initBackgroundEngine", t), unwrapThrowable(t))
         }
