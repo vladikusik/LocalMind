@@ -109,11 +109,11 @@ class MlcNativeEngineBridge(private val context: Context) {
                 it.contains("mlc_llm", ignoreCase = true)
         }
         val hasMlc4jClass = runCatching {
-            Class.forName("ai.mlc.mlcllm.ChatModule")
+            Class.forName("ai.mlc.mlcllm.JSONFFIEngine")
             true
         }.getOrElse {
             runCatching {
-                Class.forName("ai.mlc.mlcllm.JSONFFIEngine")
+                Class.forName("ai.mlc.mlcllm.ChatModule")
                 true
             }.getOrDefault(false)
         }
@@ -152,6 +152,16 @@ class MlcNativeEngineBridge(private val context: Context) {
         temperature: Float,
         maxTokens: Int
     ): Flow<StreamEvent> {
+        val jsonFfiClass = runCatching { Class.forName("ai.mlc.mlcllm.JSONFFIEngine") }.getOrNull()
+        if (jsonFfiClass != null) {
+            return streamViaJsonFfiEngine(
+                modelDir = modelDir,
+                displayName = displayName,
+                messages = messages,
+                temperature = temperature,
+                maxTokens = maxTokens
+            )
+        }
         val chatModuleClass = runCatching { Class.forName("ai.mlc.mlcllm.ChatModule") }.getOrNull()
         if (chatModuleClass != null) {
             return streamViaChatModule(
@@ -663,6 +673,21 @@ class MlcNativeEngineBridge(private val context: Context) {
             ?: runCatching { cls.getMethod(fallbackName) }.getOrNull()
     }
 
+    /**
+     * Restores the untouched original HuggingFace `mlc-chat-config.json` from
+     * `mlc-chat-config.orig.json` when present (e.g. after upgrading from legacy ChatModule
+     * to modern JSONFFIEngine without requiring the user to re-download model weights).
+     */
+    private fun restoreOriginalMlcChatConfig(modelDir: File) {
+        val backupFile = File(modelDir, "mlc-chat-config.orig.json")
+        val configFile = File(modelDir, "mlc-chat-config.json")
+        if (backupFile.exists() && backupFile.length() > 0L) {
+            runCatching {
+                backupFile.copyTo(configFile, overwrite = true)
+            }
+        }
+    }
+
     private fun streamViaJsonFfiEngine(
         modelDir: File,
         displayName: String,
@@ -670,6 +695,7 @@ class MlcNativeEngineBridge(private val context: Context) {
         temperature: Float,
         maxTokens: Int
     ): Flow<StreamEvent> = callbackFlow {
+        restoreOriginalMlcChatConfig(modelDir)
         val status = inspectStatus()
         val config = MlcChatConfig.loadFromDir(modelDir)
 
@@ -720,8 +746,21 @@ class MlcNativeEngineBridge(private val context: Context) {
                 if (!finished.get()) {
                     try {
                         val arr = JSONArray(responsesJson)
+                        var sawFinish = false
+                        var batchDecodeTps: Float? = null
+                        var batchPrefillTps: Float? = null
+
                         for (i in 0 until arr.length()) {
                             val resp = arr.optJSONObject(i) ?: continue
+                            val usage = resp.optJSONObject("usage")
+                            val extra = usage?.optJSONObject("extra")
+                            extra?.optDouble("decode_tokens_per_s", Double.NaN)
+                                ?.takeIf { !it.isNaN() && it > 0.0 }
+                                ?.let { batchDecodeTps = it.toFloat() }
+                            extra?.optDouble("prefill_tokens_per_s", Double.NaN)
+                                ?.takeIf { !it.isNaN() && it > 0.0 }
+                                ?.let { batchPrefillTps = it.toFloat() }
+
                             val choices = resp.optJSONArray("choices")
                             if (choices != null && choices.length() > 0) {
                                 val choice = choices.optJSONObject(0)
@@ -742,31 +781,28 @@ class MlcNativeEngineBridge(private val context: Context) {
                                     ""
                                 }
                                 if (finishReason.isNotBlank() && finishReason != "null") {
-                                    val usage = resp.optJSONObject("usage")
-                                    val extra = usage?.optJSONObject("extra")
-                                    val decodeTps = extra?.optDouble("decode_tokens_per_s", Double.NaN)
-                                        ?.takeIf { !it.isNaN() && it > 0.0 }?.toFloat()
-                                        ?: computeDecodeTps(firstTokenNs, decodeChunks)
-                                    val prefillTps = extra?.optDouble("prefill_tokens_per_s", Double.NaN)
-                                        ?.takeIf { !it.isNaN() && it > 0.0 }?.toFloat()
-                                    val ttftMs = if (firstTokenNs > 0L) {
-                                        (firstTokenNs - requestStartNs) / 1_000_000L
-                                    } else 0L
-
-                                    if (finished.compareAndSet(false, true)) {
-                                        trySend(
-                                            StreamEvent.Completed(
-                                                tokensPerSecond = decodeTps,
-                                                modelName = modelLabel,
-                                                ttftMs = ttftMs,
-                                                prefillTokensPerSec = prefillTps,
-                                                kvCacheReused = true
-                                            )
-                                        )
-                                        close()
-                                    }
+                                    sawFinish = true
                                 }
+                            } else if (usage != null && (batchDecodeTps != null || decodeChunks > 0)) {
+                                sawFinish = true
                             }
+                        }
+
+                        if (sawFinish && finished.compareAndSet(false, true)) {
+                            val decodeTps = batchDecodeTps ?: computeDecodeTps(firstTokenNs, decodeChunks)
+                            val ttftMs = if (firstTokenNs > 0L) {
+                                (firstTokenNs - requestStartNs) / 1_000_000L
+                            } else 0L
+                            trySend(
+                                StreamEvent.Completed(
+                                    tokensPerSecond = decodeTps,
+                                    modelName = modelLabel,
+                                    ttftMs = ttftMs,
+                                    prefillTokensPerSec = batchPrefillTps,
+                                    kvCacheReused = true
+                                )
+                            )
+                            close()
                         }
                     } catch (t: Throwable) {
                         if (finished.compareAndSet(false, true)) {
@@ -909,19 +945,23 @@ class MlcNativeEngineBridge(private val context: Context) {
                     throw IOException(formatThrowable("createEngine", t), unwrapThrowable(t))
                 }
 
-                val callbackInterface = try {
-                    Class.forName("ai.mlc.mlcllm.JSONFFIEngine\$KotlinFunction")
-                } catch (t: Throwable) {
-                    throw IOException(formatThrowable("loadCallbackInterface", t), unwrapThrowable(t))
-                }
+                val callbackInterface = engineClass.methods
+                    .firstOrNull { it.name == "initBackgroundEngine" && it.parameterTypes.size == 1 && it.parameterTypes[0].isInterface }
+                    ?.parameterTypes?.get(0)
+                    ?: try {
+                        Class.forName("ai.mlc.mlcllm.JSONFFIEngine\$KotlinFunction")
+                    } catch (t: Throwable) {
+                        throw IOException(formatThrowable("loadCallbackInterface", t), unwrapThrowable(t))
+                    }
 
                 val callbackProxy = Proxy.newProxyInstance(
                     callbackInterface.classLoader,
                     arrayOf(callbackInterface)
                 ) { _, method, args ->
-                    if (method.name == "invoke" && args != null && args.isNotEmpty()) {
-                        val responseJson = args[0] as? String ?: return@newProxyInstance null
-                        dispatchStreamResponses(responseJson)
+                    if (args != null && args.size == 1 && args[0] is String) {
+                        dispatchStreamResponses(args[0] as String)
+                    } else if (method.name == "toString") {
+                        return@newProxyInstance "LocalMind-MLC-StreamCallback"
                     }
                     null
                 }
@@ -1297,7 +1337,9 @@ class MlcNativeEngineBridge(private val context: Context) {
             val arr = JSONArray(responsesJson)
             arr.optJSONObject(0)?.optString("id").orEmpty()
         }.getOrDefault("")
-        val cb = if (firstId.isNotBlank()) snapshot[firstId] else snapshot.values.firstOrNull()
+        val cb = snapshot[firstId]
+            ?: snapshot[firstId.removePrefix("chatcmpl-")]
+            ?: snapshot.values.firstOrNull()
         cb?.invoke(responsesJson)
     }
 

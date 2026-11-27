@@ -33,7 +33,7 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" "build-tools;36.0.0"
 
-      - name: Cache official prebuilt MLC-LLM TVM Android runtime (mlc4j)
+      - name: Cache compiled MLC-LLM TVM Android runtime (mlc4j + GPU kernels)
         id: cache-mlc
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false }}
         uses: actions/cache@v4
@@ -42,152 +42,210 @@ jobs:
             app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
             app/libs/mlc4j-runtime.jar
             app/src/main/assets/mlc-app-config.json
-          key: mlc4j-prebuilt-apk-v9
+          key: mlc4j-source-package-v1
 
-      - name: Extract official prebuilt MLC-LLM TVM native runtime (mlc4j)
+      - name: Set up Python 3.11 for MLC-LLM compiler
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false) && steps.cache-mlc.outputs.cache-hit != 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Rust Android target for MLC tokenizers
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false) && steps.cache-mlc.outputs.cache-hit != 'true' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Compile official MLC-LLM TVM native runtime (mlc4j) for curated Android models
         id: build-mlc
         if: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_mlc_runtime != false) && steps.cache-mlc.outputs.cache-hit != 'true' }}
         run: |
           set -euo pipefail
-          MLC_WORK="$RUNNER_TEMP/mlc-prebuilt"
+          MLC_WORK="$RUNNER_TEMP/mlc-build"
           rm -rf "$MLC_WORK"
-          mkdir -p "$MLC_WORK/apk" "$MLC_WORK/filtered" "$MLC_WORK/dex2jar" "$MLC_WORK/src/ai/mlc/mlcllm"
+          mkdir -p "$MLC_WORK/pkg" "$MLC_WORK/jar_stage"
 
-          echo "::group::Download official prebuilt mlc-chat.apk from mlc-ai/binary-mlc-llm-libs"
-          APK_URL="https://github.com/mlc-ai/binary-mlc-llm-libs/releases/download/Android/mlc-chat.apk"
-          if ! curl -fsSLI "$APK_URL" >/dev/null 2>&1; then
-            APK_URL=$(curl -fsSL "https://api.github.com/repos/mlc-ai/binary-mlc-llm-libs/releases" \
-              | python3 -c "import sys, json; rels=json.load(sys.stdin); urls=[a['browser_download_url'] for r in rels for a in r.get('assets',[]) if a['name'].lower().endswith('.apk') and 'mlc' in a['name'].lower()]; print(urls[0] if urls else '')")
+          echo "::group::Install host build tools & locate Android NDK r27"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build maven git-lfs >/dev/null
+          git lfs install --skip-smudge || true
+
+          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/27.* 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973"
+            NDK_DIR="$ANDROID_HOME/ndk/27.0.12077973"
           fi
-          if [ -z "$APK_URL" ]; then
-            echo "ERROR: Could not locate mlc-chat.apk in mlc-ai/binary-mlc-llm-libs releases."
-            exit 1
-          fi
-          echo "Downloading: $APK_URL"
-          curl -fSL --retry 3 -o "$MLC_WORK/mlc-chat.apk" "$APK_URL"
+          export ANDROID_NDK="$NDK_DIR"
+          export ANDROID_NDK_HOME="$NDK_DIR"
+          export TVM_NDK_CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          export PATH="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TVM_NDK_CC"
+          export CC_aarch64_linux_android="$TVM_NDK_CC"
+          export CXX_aarch64_linux_android="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          export AR_aarch64_linux_android="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export GIT_LFS_SKIP_SMUDGE=1
+          echo "ANDROID_NDK=$ANDROID_NDK"
+          echo "TVM_NDK_CC=$TVM_NDK_CC"
+          test -x "$TVM_NDK_CC"
           echo "::endgroup::"
 
-          echo "::group::Extract libtvm4j_runtime_packed.so and mlc-app-config.json"
-          unzip -q "$MLC_WORK/mlc-chat.apk" -d "$MLC_WORK/apk"
-          echo "Native arm64-v8a libraries inside mlc-chat.apk:"
-          ls -lh "$MLC_WORK/apk/lib/arm64-v8a/" || true
-          SO_PATH=$(find "$MLC_WORK/apk/lib/arm64-v8a" -name "libtvm4j_runtime_packed.so" | head -n 1 || true)
+          echo "::group::Install mlc-llm & mlc-ai nightly compiler wheels"
+          python3 -m pip install --upgrade pip -q
+          python3 -m pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu
+          python3 -c "import tvm, mlc_llm; print('TVM:', tvm.__file__, 'MLC:', mlc_llm.__file__)"
+          echo "::endgroup::"
+
+          echo "::group::Clone mlc-ai/mlc-llm source tree for Android mlc4j & runtime cross-compilation"
+          git clone --depth 1 --recursive --shallow-submodules https://github.com/mlc-ai/mlc-llm.git "$MLC_WORK/mlc-llm"
+          export MLC_LLM_SOURCE_DIR="$MLC_WORK/mlc-llm"
+          export TVM_SOURCE_DIR="$MLC_WORK/mlc-llm/3rdparty/tvm"
+          echo "::endgroup::"
+
+          echo "::group::Generate mlc-package-config.json & compile Android GPU kernels via mlc_llm package"
+          python3 - "$MLC_WORK/pkg" << 'PY_PKG'
+          import json, os, shutil, subprocess, sys, urllib.request
+
+          pkg_dir = sys.argv[1]
+          candidates = [
+              ("mlc-ai/Llama-3.2-3B-Instruct-q4f16_1-MLC", 2600000000),
+              ("mlc-ai/Llama-3.2-1B-Instruct-q4f16_1-MLC", 1100000000),
+              ("mlc-ai/Qwen2.5-1.5B-Instruct-q4f16_1-MLC", 1400000000),
+              ("mlc-ai/Qwen2.5-3B-Instruct-q4f16_1-MLC", 2500000000),
+              ("mlc-ai/SmolLM2-1.7B-Instruct-q4f16_1-MLC", 1500000000),
+              ("mlc-ai/gemma-2-2b-it-q4f16_1-MLC", 2100000000),
+              ("mlc-ai/Phi-3.5-mini-instruct-q4f16_1-MLC", 2900000000),
+          ]
+
+          verified = []
+          for repo_id, vram in candidates:
+              url = f"https://huggingface.co/{repo_id}/resolve/main/mlc-chat-config.json"
+              try:
+                  req = urllib.request.Request(url, headers={"User-Agent": "LocalMind-CI"})
+                  with urllib.request.urlopen(req, timeout=20) as resp:
+                      data = json.loads(resp.read().decode("utf-8"))
+                      if isinstance(data, dict) and data.get("model_type"):
+                          model_id = repo_id.split("/", 1)[1]
+                          verified.append({
+                              "model": f"HF://{repo_id}",
+                              "model_id": model_id,
+                              "estimated_vram_bytes": vram,
+                              "bundle_weight": False,
+                              "overrides": {
+                                  "context_window_size": 4096,
+                                  "prefill_chunk_size": 512,
+                              },
+                          })
+                          print(f"Verified HF MLC repo: {repo_id} (type={data.get('model_type')})")
+              except Exception as exc:
+                  print(f"Skipping unavailable HF repo {repo_id}: {exc}")
+
+          if not verified:
+              raise SystemExit("ERROR: No HuggingFace MLC repos were reachable!")
+
+          help_out = subprocess.check_output(
+              [sys.executable, "-m", "mlc_llm", "package", "--help"],
+              text=True,
+              errors="replace",
+          )
+          use_explicit_flags = "--package-config" in help_out and "--output" in help_out
+
+          def run_package(entries, label):
+              cfg_path = os.path.join(pkg_dir, "mlc-package-config.json")
+              dist_dir = os.path.join(pkg_dir, "dist")
+              if os.path.exists(dist_dir):
+                  shutil.rmtree(dist_dir)
+              cfg = {"device": "android", "model_list": entries}
+              with open(cfg_path, "w", encoding="utf-8") as f:
+                  json.dump(cfg, f, indent=2)
+              print(f"=== Running mlc_llm package ({label}: {len(entries)} models) ===")
+              cmd = [sys.executable, "-m", "mlc_llm", "package"]
+              if use_explicit_flags:
+                  cmd += ["--package-config", cfg_path, "--output", dist_dir]
+              res = subprocess.run(cmd, cwd=pkg_dir)
+              return res.returncode == 0
+
+          core_ids = {
+              "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+              "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+              "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+              "Qwen2.5-3B-Instruct-q4f16_1-MLC",
+          }
+          batches = [
+              ("all-curated", verified),
+              ("core-4", [e for e in verified if e["model_id"] in core_ids]),
+              ("primary-llama-3.2-3b", [verified[0]]),
+          ]
+          seen = set()
+          for label, batch in batches:
+              if not batch:
+                  continue
+              key = tuple(e["model_id"] for e in batch)
+              if key in seen:
+                  continue
+              seen.add(key)
+              if run_package(batch, label):
+                  print(f"SUCCESS: mlc_llm package completed for batch '{label}'")
+                  sys.exit(0)
+              print(f"WARNING: mlc_llm package batch '{label}' failed; trying fallback batch...")
+
+          raise SystemExit("ERROR: mlc_llm package failed for all model batches!")
+          PY_PKG
+          echo "::endgroup::"
+
+          echo "::group::Package libtvm4j_runtime_packed.so, mlc4j-runtime.jar (JSONFFIEngine) & mlc-app-config.json"
+          SO_PATH=$(find "$MLC_WORK/pkg/dist" -name "libtvm4j_runtime_packed.so" | head -n 1 || true)
+          TVM4J_JAR=$(find "$MLC_WORK/pkg/dist" -name "tvm4j_core.jar" | head -n 1 || true)
+          APP_CFG=$(find "$MLC_WORK/pkg/dist" -name "mlc-app-config.json" | head -n 1 || true)
+
           if [ -z "$SO_PATH" ] || [ ! -s "$SO_PATH" ]; then
-            echo "ERROR: libtvm4j_runtime_packed.so not found inside mlc-chat.apk!"
-            find "$MLC_WORK/apk/lib" -maxdepth 3 || true
+            echo "ERROR: libtvm4j_runtime_packed.so not produced by mlc_llm package!"
+            find "$MLC_WORK/pkg/dist" -maxdepth 5 || true
+            exit 1
+          fi
+          if [ -z "$TVM4J_JAR" ] || [ ! -s "$TVM4J_JAR" ]; then
+            echo "ERROR: tvm4j_core.jar not produced by mlc_llm package!"
+            find "$MLC_WORK/pkg/dist" -maxdepth 5 || true
+            exit 1
+          fi
+          if [ -z "$APP_CFG" ] || [ ! -s "$APP_CFG" ]; then
+            echo "ERROR: mlc-app-config.json not produced by mlc_llm package!"
+            find "$MLC_WORK/pkg/dist" -maxdepth 5 || true
             exit 1
           fi
 
           mkdir -p app/src/main/jniLibs/arm64-v8a app/libs app/src/main/assets
           cp "$SO_PATH" app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so
+          cp "$APP_CFG" app/src/main/assets/mlc-app-config.json
+
           echo "Dynamic dependencies (NEEDED) of libtvm4j_runtime_packed.so:"
           readelf -d app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so | grep NEEDED || true
+          echo "Generated mlc-app-config.json:"
+          cat app/src/main/assets/mlc-app-config.json
 
-          APP_CFG=$(find "$MLC_WORK/apk/assets" -name "mlc-app-config.json" | head -n 1 || true)
-          if [ -n "$APP_CFG" ] && [ -s "$APP_CFG" ]; then
-            cp "$APP_CFG" app/src/main/assets/mlc-app-config.json
-            echo "Bundled mlc-app-config.json:"
-            cat app/src/main/assets/mlc-app-config.json
-          fi
-          echo "::endgroup::"
+          unzip -qo "$TVM4J_JAR" -d "$MLC_WORK/jar_stage"
+          rm -rf "$MLC_WORK/jar_stage/META-INF"
 
-          echo "::group::Extract official org.apache.tvm and ai.mlc.mlcllm classes from mlc-chat.apk"
-          D2J_URL="https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip"
-          curl -fSL --retry 3 -o "$MLC_WORK/dex2jar.zip" "$D2J_URL"
-          unzip -q "$MLC_WORK/dex2jar.zip" -d "$MLC_WORK/dex2jar"
-          D2J_BIN=$(find "$MLC_WORK/dex2jar" -name "d2j-dex2jar.sh" | head -n 1)
-          chmod +x "$D2J_BIN" "$(dirname "$D2J_BIN")"/*.sh
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-36.1/android.jar"
+          JAVA_SRCS=$(find "$MLC_LLM_SOURCE_DIR/android/mlc4j/src/main/java" -name "*.java")
+          echo "Compiling official mlc4j Java sources:"
+          echo "$JAVA_SRCS"
+          javac --release 11 -cp "$TVM4J_JAR:$ANDROID_JAR" -d "$MLC_WORK/jar_stage" $JAVA_SRCS
 
-          for dex in "$MLC_WORK/apk"/classes*.dex; do
-            [ -f "$dex" ] || continue
-            base=$(basename "$dex" .dex)
-            "$D2J_BIN" -f -o "$MLC_WORK/${base}.jar" "$dex"
-            unzip -qo "$MLC_WORK/${base}.jar" "org/apache/tvm/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
-            unzip -qo "$MLC_WORK/${base}.jar" "ai/mlc/mlcllm/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
-          done
-
-          if [ ! -f "$MLC_WORK/filtered/org/apache/tvm/Function.class" ] || [ ! -f "$MLC_WORK/filtered/org/apache/tvm/LibInfo.class" ]; then
-            echo "ERROR: org/apache/tvm/Function.class or LibInfo.class not found in mlc-chat.apk dex!"
-            find "$MLC_WORK/filtered" -maxdepth 4 || true
-            exit 1
-          fi
-
-          if [ ! -f "$MLC_WORK/filtered/ai/mlc/mlcllm/ChatModule.class" ] && [ ! -f "$MLC_WORK/filtered/ai/mlc/mlcllm/JSONFFIEngine.class" ]; then
-            echo "ERROR: Neither ai.mlc.mlcllm.ChatModule nor ai.mlc.mlcllm.JSONFFIEngine found in mlc-chat.apk!"
-            find "$MLC_WORK/filtered" -maxdepth 4 || true
-            exit 1
-          fi
-
-          # Include org.slf4j if ANY extracted TVM/MLC class references it
-          if find "$MLC_WORK/filtered" -name "*.class" -exec javap -v {} + 2>/dev/null | grep -q "org/slf4j/"; then
-            echo "Extracted TVM/MLC classes reference org.slf4j — bundling org/slf4j..."
-            for jar_file in "$MLC_WORK"/classes*.jar; do
-              [ -f "$jar_file" ] || continue
-              unzip -qo "$jar_file" "org/slf4j/*" -d "$MLC_WORK/filtered" 2>/dev/null || true
-            done
-            if [ ! -f "$MLC_WORK/filtered/org/slf4j/LoggerFactory.class" ]; then
-              echo "Fetching slf4j-api + slf4j-nop classes..."
+          if find "$MLC_WORK/jar_stage" -name "*.class" -exec javap -v {} + 2>/dev/null | grep -q "org/slf4j/"; then
+            if [ ! -f "$MLC_WORK/jar_stage/org/slf4j/LoggerFactory.class" ]; then
+              echo "Bundling slf4j-api + slf4j-nop for tvm4j_core.jar..."
               curl -fSL -o "$MLC_WORK/slf4j-api.jar" "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar"
               curl -fSL -o "$MLC_WORK/slf4j-nop.jar" "https://repo1.maven.org/maven2/org/slf4j/slf4j-nop/1.7.36/slf4j-nop-1.7.36.jar"
-              unzip -qo "$MLC_WORK/slf4j-api.jar" "org/slf4j/*" -d "$MLC_WORK/filtered"
-              unzip -qo "$MLC_WORK/slf4j-nop.jar" "org/slf4j/*" -d "$MLC_WORK/filtered"
+              unzip -qo "$MLC_WORK/slf4j-api.jar" "org/slf4j/*" -d "$MLC_WORK/jar_stage"
+              unzip -qo "$MLC_WORK/slf4j-nop.jar" "org/slf4j/*" -d "$MLC_WORK/jar_stage"
             fi
           fi
 
-          echo "Extracted ai.mlc.mlcllm classes:"
-          ls -la "$MLC_WORK/filtered/ai/mlc/mlcllm/" || true
-
-          # Inspect official ChatModule bytecode to detect exact reload(String, String) parameter order
-          FIRST_IS_LIB="true"
-          RELOAD_HINT=""
-          if [ -f "$MLC_WORK/filtered/ai/mlc/mlcllm/ChatModule.class" ]; then
-            javap -c -p -cp "$MLC_WORK/filtered" ai.mlc.mlcllm.ChatModule || true
-            FIRST_IS_LIB=$(python3 - "$MLC_WORK" << 'PY_CHATMOD'
-          import subprocess, sys
-          work = sys.argv[1]
-          first_is_lib = True
-          try:
-              out = subprocess.check_output(["javap", "-c", "-p", "-cp", f"{work}/filtered", "ai.mlc.mlcllm.ChatModule"], text=True, errors="replace")
-              lines = out.splitlines()
-              in_reload = False
-              last_param = 1
-              for ln in lines:
-                  if "reload(java.lang.String, java.lang.String)" in ln:
-                      in_reload = True
-                      continue
-                  if in_reload:
-                      if ln.strip() == "":
-                          break
-                      if "aload_1" in ln:
-                          last_param = 1
-                      elif "aload_2" in ln:
-                          last_param = 2
-                      if "org/apache/tvm/Function.pushArg:(Ljava/lang/String;)" in ln:
-                          first_is_lib = (last_param == 1)
-                          break
-          except Exception as exc:
-              print(f"# ChatModule inspect error: {exc}", file=sys.stderr)
-          print("true" if first_is_lib else "false")
-          PY_CHATMOD
-            )
-            RELOAD_HINT="ChatModule(firstArgIsModelLib=$FIRST_IS_LIB)"
-          fi
-          echo "Detected ChatModule reload parameter order: RELOAD_FIRST_ARG_IS_MODEL_LIB=$FIRST_IS_LIB"
-
-          ANDROID_JAR="$ANDROID_HOME/platforms/android-36.1/android.jar"
-          cat << JAVA_META > "$MLC_WORK/src/ai/mlc/mlcllm/ChatModuleMeta.java"
-          package ai.mlc.mlcllm;
-
-          public final class ChatModuleMeta {
-              public static final boolean RELOAD_FIRST_ARG_IS_MODEL_LIB = ${FIRST_IS_LIB};
-              public static final String RELOAD_HINT = "${RELOAD_HINT}";
-          }
-          JAVA_META
-
-          javac --release 11 -cp "$MLC_WORK/filtered:$ANDROID_JAR" -d "$MLC_WORK/filtered" "$MLC_WORK/src/ai/mlc/mlcllm/ChatModuleMeta.java"
-
-          jar cf app/libs/mlc4j-runtime.jar -C "$MLC_WORK/filtered" .
-          jar tf app/libs/mlc4j-runtime.jar | grep -E "ai/mlc/mlcllm/|org/apache/tvm/" | head -n 40
+          jar cf app/libs/mlc4j-runtime.jar -C "$MLC_WORK/jar_stage" .
+          test -f "$MLC_WORK/jar_stage/org/apache/tvm/Function.class"
+          test -f "$MLC_WORK/jar_stage/ai/mlc/mlcllm/JSONFFIEngine.class"
+          echo "Compiled JSONFFIEngine API:"
+          javap -p -cp app/libs/mlc4j-runtime.jar ai.mlc.mlcllm.JSONFFIEngine || true
           ls -lh app/src/main/jniLibs/arm64-v8a/libtvm4j_runtime_packed.so app/libs/mlc4j-runtime.jar
           echo "::endgroup::"
 
