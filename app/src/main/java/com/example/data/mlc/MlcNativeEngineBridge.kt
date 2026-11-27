@@ -414,28 +414,50 @@ class MlcNativeEngineBridge(private val context: Context) {
             root.put("shift_fill_factor", 0.3)
         }
 
-        val ctxWindow = root.optInt(
-            "context_window_size",
-            modelCfg?.optInt("context_window_size", 4096) ?: 4096
-        ).coerceIn(512, 4096)
-        if (!root.has("context_window_size") || root.optInt("context_window_size", 0) > 4096) {
+        val rawSlidingWindow = when {
+            root.has("sliding_window_size") && !root.isNull("sliding_window_size") ->
+                root.optInt("sliding_window_size", -1)
+            root.has("sliding_window") && !root.isNull("sliding_window") ->
+                root.optInt("sliding_window", -1)
+            else -> modelCfg?.optInt("sliding_window_size", -1) ?: -1
+        }
+        val rawCtxWindow = when {
+            root.has("max_window_size") && !root.isNull("max_window_size") ->
+                root.optInt("max_window_size", 4096)
+            root.has("context_window_size") && !root.isNull("context_window_size") ->
+                root.optInt("context_window_size", 4096)
+            else -> modelCfg?.optInt("context_window_size", 4096) ?: 4096
+        }
+        val ctxWindow = rawCtxWindow.coerceIn(512, 4096)
+        if (root.has("context_window_size")) {
             root.put("context_window_size", ctxWindow)
         }
-        if (!root.has("max_window_size") || root.isNull("max_window_size")) {
+        // Classic llm_chat.cc (line 512) forbids specifying both sliding_window(_size) and
+        // max_window_size—even when sliding_window_size is -1—and rejects attention_sink_size
+        // without sliding_window. Enforce strict mutual exclusion.
+        if (rawSlidingWindow > 0) {
+            root.remove("max_window_size")
+            root.remove("sliding_window")
+            root.put("sliding_window_size", rawSlidingWindow.coerceIn(512, 4096))
+            val sinkSize = if (root.has("attention_sink_size") && !root.isNull("attention_sink_size")) {
+                root.optInt("attention_sink_size", 4)
+            } else {
+                modelCfg?.optInt("attention_sink_size", 4) ?: 4
+            }.coerceAtLeast(0)
+            root.put("attention_sink_size", sinkSize)
+        } else {
+            root.remove("sliding_window")
+            root.remove("sliding_window_size")
+            root.remove("attention_sink_size")
             root.put("max_window_size", ctxWindow)
         }
+
         val prefillChunk = root.optInt(
             "prefill_chunk_size",
             modelCfg?.optInt("prefill_chunk_size", 512) ?: 512
-        ).coerceIn(128, 512)
+        ).coerceIn(128, minOf(512, ctxWindow))
         root.put("prefill_chunk_size", prefillChunk)
 
-        if (!root.has("sliding_window_size") || root.isNull("sliding_window_size")) {
-            root.put("sliding_window_size", modelCfg?.optInt("sliding_window_size", -1) ?: -1)
-        }
-        if (!root.has("attention_sink_size") || root.isNull("attention_sink_size")) {
-            root.put("attention_sink_size", modelCfg?.optInt("attention_sink_size", 0) ?: 0)
-        }
         if (!root.has("vocab_size") && modelCfg != null && modelCfg.has("vocab_size")) {
             root.put("vocab_size", modelCfg.optInt("vocab_size"))
         }
@@ -459,8 +481,9 @@ class MlcNativeEngineBridge(private val context: Context) {
             root.put("conv_template", "LM")
             root.remove("conv_config")
         } else if (convObj != null) {
-            val sepsArr = convObj.optJSONArray("seps") ?: JSONArray().put("\n")
-            val sep0 = if (sepsArr.length() > 0) sepsArr.optString(0, "") else ""
+            val rawSeps = convObj.optJSONArray("seps")
+            val sepsArr = if (rawSeps != null && rawSeps.length() > 0) rawSeps else JSONArray().put("\n")
+            val sep0 = sepsArr.optString(0, "")
             val sysTemplate = convObj.optString("system_template", "{system_message}")
             val sysMessage = convObj.optString("system_message", "")
             var resolvedSys = sysTemplate.replace("{system_message}", sysMessage)
@@ -552,7 +575,11 @@ class MlcNativeEngineBridge(private val context: Context) {
             // If classic Conversation::LoadJSONOverride rejected a field in conv_config, retry with minimal LM template
             val looksLikeConvConfigError = msg.contains("conv_template", ignoreCase = true) ||
                 msg.contains("conv_config", ignoreCase = true) ||
-                msg.contains("conversation", ignoreCase = true)
+                msg.contains("conversation", ignoreCase = true) ||
+                msg.contains("stop_tokens", ignoreCase = true) ||
+                msg.contains("role_msg_sep", ignoreCase = true) ||
+                msg.contains("roles", ignoreCase = true) ||
+                msg.contains("seps", ignoreCase = true)
             if (looksLikeConvConfigError) {
                 try {
                     ensureClassicChatModuleConfig(File(modelPath), cleanLib, useMinimalLmTemplate = true)
